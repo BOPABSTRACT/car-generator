@@ -3,6 +3,7 @@
 
 import JSZip from 'jszip';
 import type { CarData, Row } from './types';
+import { normalizeCar } from './assemble';
 import {
   parseXml, serializeXml, findTable, findTables, rows, cells, setCellText, appendCellText,
   prependCellText, setCellAnswer, replaceRows, removeNode, insertBefore, findParagraph,
@@ -17,7 +18,8 @@ function orNA(data: Row[], width: number, firstOnly = false): Row[] {
   return [Array.from({ length: width }, (_, i) => (firstOnly && i > 0 ? '' : 'N/A'))];
 }
 
-export async function buildCarDocx(template: Buffer | ArrayBuffer, car: CarData): Promise<Buffer> {
+export async function buildCarDocx(template: Buffer | ArrayBuffer, input: CarData): Promise<Buffer> {
+  const car = normalizeCar(input);
   const zip = await JSZip.loadAsync(template);
   const xml = await zip.file('word/document.xml')!.async('string');
   const doc = parseXml(xml);
