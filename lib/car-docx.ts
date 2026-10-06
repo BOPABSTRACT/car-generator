@@ -52,6 +52,11 @@ export async function buildCarDocx(template: Buffer | ArrayBuffer, input: CarDat
     ['TITLE CURATIVE RECOMMENDATIONS', car.curativeSummary.title],
     ['DIVISION ORDER', car.curativeSummary.divisionOrder],
   ];
+  // CNX analysts title the 4th box "DIVISION ORDER RECOMMENDATIONS" (the 2023 form says "ITEMS")
+  {
+    const t = findTable(body, 'DIVISION ORDER');
+    setCellText(cells(rows(t)[0])[0], 'DIVISION ORDER RECOMMENDATIONS');
+  }
   for (const [label, value] of summary) {
     const t = findTable(body, label);
     const v = (value || '').trim() || 'None';

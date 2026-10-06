@@ -164,15 +164,15 @@ Return ONE JSON object with these fields (strings unless noted). TABLES MUST BE 
 - acres_title: total acreage covered by the opinion, e.g. "1.167 acres"
 - acres_resolved: FINAL resolved acreage total from the TMC, e.g. "1.34 acres" ("" if no TMC)
 - tract_description: "<tax parcels comma separated>, containing <acres_title>"
-- wi_tables: array of {"formation","rows":[{"owner","wi","nri","orri"}]} — Working Interest Ownership by formation. If UNLEASED use [{"formation":"All formations","rows":[{"owner":"Open","wi":"1.0","nri":"Open","orri":"Open"}]}]. Otherwise owner = current working-interest owner (lessee/assignee), wi and nri as decimals, orri "Yes"/"No".
+- wi_tables: array of {"formation","rows":[{"owner","wi","nri","orri"}]} — Working Interest Ownership by formation. A lease shown in the internal bringdown or the lease summaries (recorded after the opinion) counts — the tract is then leased to that lessee. NRI = WI × (1 − royalty) − any ORRI, as a decimal (e.g. 15% royalty → "0.85"). If UNLEASED use [{"formation":"All formations","rows":[{"owner":"Open","wi":"1.0","nri":"Open","orri":"Open"}]}]. Otherwise owner = current working-interest owner (lessee/assignee), wi and nri as decimals, orri "Yes"/"No".
 - amendments: [Lessor/Grantor, Lessee/Grantee, Date of Instr., Recording, Date Recorded, Term, Explanation of Modified Terms]
 - assignments: [Assignor, Assignee, Date of Instr., Recording, Date Recorded, Term, Formations Assigned, ORRI Reserved, Pugh, Other Restrictions]
 - orri: [Current Owner, ORRI, Formations Subject to ORRI, Instrument Creating ORRI, Instrument Vesting ORRI]
 - units: existing units/pools [Book/Page, Date Formed, Declarant, Unit Name, Acreage Contributed, Total Acreage, Depths Unitized]
-- wells: [Well API#, Associated Lease, Associated Lease Acreage, Associated Unit, Well Completion Date, Well Status (Active, P&A, Dry Hole, etc.), Gaps in Production / Production Notes]
+- wells: [Well API#, Associated Lease, Associated Lease Acreage, Associated Unit, Well Completion Date, Well Status (Active, P&A, Dry Hole, etc.), Gaps in Production / Production Notes] — ONLY wells located ON the subject tract or drilled under a lease that covers it (as reported in the opinion's "Relevant Well Ownership" or the abstract's well info for the subject tract). Abstract well searches usually list every well within a radius of the tract — do NOT list those nearby wells. If the opinion says there are no wells on the Subject Tract, return [].
 - well_date_checked: the analyst review date
 - lease_wide_gaps: "N/A" unless production gaps are reported
-- outsales: severances/outsales prior to lease [Book/Page, Acres, Date, Grantee, Located (Yes/No — Yes if the TMC mapped/located it), Separate T/O #]
+- outsales: severances/outsales prior to lease [Book/Page, Acres, Date, Grantee, Located (Yes/No — Yes if the TMC mapped/located it; if the TMC says it lies outside the subject tract, write "Yes – outside subject tract per TMC"), Separate T/O #]
 - liens: liens, mortgages, judgments [Instrument Number (put the book/page on a second line in parentheses, e.g. "202508584\\n(5886/70)"), Date ("executed\\nrecorded"), Parties Involved ("Mortgagor(s)\\nTo\\nMortgagee"), Amount (e.g. "$113,900.00"), Released (Yes/No — check the bringdown for a satisfaction/release), Release Instrument (instrument/book-page of the release if known, else describe e.g. "Satisfaction dated 6/29/2026, recorded 7/6/2026")]
 - tax_fully_assessed: answer to "Is O&G in place fully assessed according to the Title Opinion?" — for Pennsylvania use exactly "N/A, oil and gas interests are not separately assessed for real estate tax purposes in the Commonwealth of Pennsylvania"
 - tax_delinquent: answer to "Are any assessments listed as delinquent?" — "N/A" if none, else describe
@@ -210,14 +210,14 @@ CNX ANALYST CONVENTIONS (follow these closely):
 - Name variations / aliases / identity assumptions: "Advisory".
 - Heirship / unprobated estates / unknown heirs: open, team land: obtain death and heirship affidavit and lease from heirs.
 - Items needing a legal judgment call (questionable reservation, unclear vesting, quiet title validity): open, team title, recommendation beginning "Title Professional Review requested to determine ...".
-- General curative items and non-action items are "Advisory" unless they require specific work on this tract.
+- GENERAL curative items and NON-ACTION items: recommendation is exactly "Advisory" (status advisory) — do not add explanations, even for road or gap items in these sections.
 - COMMENTS AND LIMITATIONS: return ONE item whose defect contains all of the numbered comments/limitations (each on its own line, keep numbering) and recommendation "".
 - INTERNAL BRINGDOWN ITEMS: only if the internal bringdown shows conveyances, leases, easements or encumbrances recorded after the opinion's certification date that are NOT already addressed by an opinion item (a mortgage satisfaction is addressed under the mortgage item instead). Defect = description from the bringdown; give a recommendation.`;
 
 export async function extractCurative(s: SourceTexts, part: 'specific' | 'other'): Promise<CurativeExtract> {
   const scope = part === 'specific'
     ? 'Return ONLY the SPECIFIC curative action items / title requirements (the tract-specific requirements), plus any INTERNAL BRINGDOWN ITEMS. Do NOT include general items, non-action items or comments/limitations — another pass handles those. Each opinion item appears exactly once.'
-    : 'Return ONLY the GENERAL curative action items, the NON-ACTION curative items, and the COMMENTS AND LIMITATIONS. Do NOT include specific items. Each opinion item appears exactly once — never repeat an item. Also return "misc_notes": any additional title notes the analyst should record (or "None").';
+    : 'Return ONLY the GENERAL curative action items, the NON-ACTION curative items, and the COMMENTS AND LIMITATIONS. Do NOT include specific items. Each opinion item appears exactly once — never repeat an item. Also return "misc_notes": "None" unless there is an important title matter that is not covered by any curative item.';
   const prompt = `List the curative items from the title opinion for the "CURATIVE ITEMS AND RECOMMENDATIONS" table of the CNX Curative Action Report, in the order they appear in the opinion. Analyst review date: ${s.reviewDate || 'today'}.
 
 ${scope}
@@ -238,19 +238,20 @@ export async function extractOwnership(s: SourceTexts): Promise<OwnershipExtract
 
 Rules:
 - Use the opinion's current oil and gas ownership tables / certification. Apply any conveyances in the internal bringdown that changed ownership after the certification date.
-- If the opinion lists ownership separately "As to Parcel One / Parcel Two" (or by tract), create one parcel per tract in that order; otherwise a single parcel covering all tax parcels.
+- Create separate parcels ONLY when ownership differs between tax parcels (e.g. the opinion lists different owners or interests "As to Parcel One / Parcel Two"). If every tax parcel has the same owners and interests, return ONE parcel whose tmp lists all tax parcels comma-separated (e.g. "240.05-01-01, 240.05-01-03, 240.06-01-18") and whose acres are the totals.
 - One owner entry per owner per parcel. Keep the owner's name as written in the opinion and add the tenancy where stated (", JTWROS" for "with rights of survivorship", "husband and wife, as tenants by the entireties" → ", TBE").
 - exec_fraction = leasing / executive rights fraction; royalty_fraction = oil and gas royalty (mineral) fraction. Keep exact fractions as written (e.g. "1/2", "1/22", "1"). Never round.
 - address: street on line 1, city/state/zip on line 2 (use "\\n").
 - vesting: vesting instrument (e.g. "Instr. #201304047 (4430/171), dated 4/3/2013").
-- lease_index: the lease_index from <lease_summaries> whose lessor is this owner AND which covers this parcel; null if none. An owner is only leased if a provided lease (or a current lease reported in the opinion) covers them.
-- lease_status: "Open" when lease_index is null; otherwise "Primary Term" if the review date is before the primary term expiration, "Extended Term" if within an extension, or "HBP" if held by production.
+- lease_index: the lease_index from <lease_summaries> whose lessor is this owner AND which covers this parcel; null if none.
+- record_leases / record_lease_index: if an owner is leased by a lease that is NOT in <lease_summaries> but IS shown in the internal bringdown or the opinion (e.g. a Memorandum of Lease recorded after the certification date), add it to "record_leases" as {"lessors","lessee","effective_date","recording","agreement_number","primary_term_expiration","royalty_rate","formations"} (use "" for unknown values; recording = instrument number or book/page) and set that owner's record_lease_index to its position. Otherwise record_lease_index is null.
+- lease_status: "Open" when the owner is unleased; otherwise "Primary Term" if the review date is before the primary term expiration, "Extended Term" if within an extension, or "HBP" if held by production.
 - qls_agreement: CNX QLS/QLA agreement number for that owner's lease if shown, else "".
 - notes: "" unless something specific to this owner needs review.
 - parcels: [{"label":"Parcel One","tmp":"240.06-01-11","deeded_acres":"0.217","resolved_acres":"0.29"}] — deeded/assessed acres from the opinion (number only); resolved acres per parcel from the most recent TMC (number only, "" if no TMC).
 - title_notes: 1-3 sentences for the Pad Summary "Title Notes" column describing how the current owners hold title (vesting instrument, date, tenancy, name changes).
 
-Return JSON: {"parcels":[...], "owners":[{"parcel_index":0,"tmp":"","owner_name":"","address":"","exec_fraction":"","royalty_fraction":"","vesting":"","lease_index":null,"lease_status":"","qls_agreement":"","notes":""}], "title_notes":""}
+Return JSON: {"parcels":[...], "owners":[{"parcel_index":0,"tmp":"","owner_name":"","address":"","exec_fraction":"","royalty_fraction":"","vesting":"","lease_index":null,"record_lease_index":null,"lease_status":"","qls_agreement":"","notes":""}], "record_leases":[], "title_notes":""}
 Keep output compact — there may be hundreds of owners.
 
 ${allSources(s, false)}`;

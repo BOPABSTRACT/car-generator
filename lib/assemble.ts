@@ -38,11 +38,66 @@ export function decimalString(f: string): string {
   return parseFloat(d.toFixed(8)).toString();
 }
 
-function royaltyDisplay(rate: string): string {
+/** CAR style: "0.15 (Gross)" */
+function royaltyDisplay(rate: string, gross?: string): string {
   const d = fractionToDecimal(rate);
   if (d === null) return rate || '';
-  const pct = d <= 1 ? d * 100 : d;
-  return `${parseFloat(pct.toFixed(4))}%`;
+  const dec = d > 1 ? d / 100 : d;
+  return `${parseFloat(dec.toFixed(6))}${/^y/i.test(gross || '') ? ' (Gross)' : ''}`;
+}
+
+function poolingDisplay(v: string): string {
+  return /^unlimited$/i.test((v || '').trim()) ? 'No Limit' : v || '';
+}
+
+function pughDisplay(v: string): string {
+  return /^no$/i.test((v || '').trim()) ? 'None' : v || '';
+}
+
+function heldByDisplay(v: string): string {
+  return /primary\s*term/i.test(v || '') ? 'Term' : v || 'Term';
+}
+
+/**
+ * - adds leases known only from the bringdown/opinion (record_leases) to the lease list
+ * - merges parcels whose owners and interests are identical into one parcel (CNX shows them as one table)
+ */
+export function normalizeOwnership(own: OwnershipExtract, leases: LeaseInfo[]): { ownership: OwnershipExtract; leases: LeaseInfo[] } {
+  const record = (own.record_leases || []).map((r): LeaseInfo => ({
+    source_file: 'record', lessors: r.lessors || '', lessee: r.lessee || '', agreement_number: r.agreement_number || '',
+    effective_date: r.effective_date || '', recording: r.recording || '', recorded_date: '', primary_term: '',
+    primary_term_expiration: r.primary_term_expiration || '', extension_type: '', extension_terms: '',
+    earliest_extension_expiration: '', final_extension_expiration: '', formations: r.formations || '',
+    pooling_limitation: '', pugh: '', cross_unit_prohibited: '', gross_acres: '', tmps_covered: '',
+    royalty_rate: r.royalty_rate || '', gross_royalty: '', deduct_language: '', market_enhancement: '', min_pay: '',
+    recoupment_allowed: '', mwm: '', apportionment: '', notes_for_reviewer: '',
+  }));
+  const allLeases = [...leases, ...record];
+  let owners = (own.owners || []).map((o) => {
+    const ri = o.record_lease_index;
+    if ((o.lease_index === null || o.lease_index === undefined) && ri !== null && ri !== undefined && record[ri]) {
+      return { ...o, lease_index: leases.length + ri, lease_status: !o.lease_status || /^open$/i.test(o.lease_status) ? 'Primary Term' : o.lease_status };
+    }
+    return o;
+  });
+  let parcels = own.parcels || [];
+
+  // merge parcels with identical ownership
+  if (parcels.length > 1) {
+    const sig = (pi: number) => owners.filter((o) => (o.parcel_index ?? 0) === pi)
+      .map((o) => [o.owner_name.toLowerCase().replace(/[^a-z]/g, ''), fractionToDecimal(o.exec_fraction), fractionToDecimal(o.royalty_fraction), o.lease_index ?? ''].join('|'))
+      .sort().join('#');
+    const first = sig(0);
+    if (first && parcels.every((_, i) => sig(i) === first)) {
+      const sum = (k: 'deeded_acres' | 'resolved_acres') => {
+        const vals = parcels.map((p) => parseFloat((p[k] || '').replace(/,/g, '')));
+        return vals.every((v) => !isNaN(v)) ? String(parseFloat(vals.reduce((a, b) => a + b, 0).toFixed(4))) : '';
+      };
+      parcels = [{ label: 'Parcel One', tmp: parcels.map((p) => p.tmp).filter(Boolean).join(', '), deeded_acres: sum('deeded_acres'), resolved_acres: sum('resolved_acres') }];
+      owners = owners.filter((o) => (o.parcel_index ?? 0) === 0).map((o) => ({ ...o, tmp: parcels[0].tmp }));
+    }
+  }
+  return { ownership: { ...own, parcels, owners }, leases: allLeases };
 }
 
 function numbered(lines: string[]): string {
@@ -173,12 +228,20 @@ export interface AssembleInput {
 }
 
 export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
-  const { core, ownership, leases } = input;
+  const { core } = input;
+  const { ownership, leases } = normalizeOwnership(input.ownership, input.leases || []);
   const form: FormInfo = {
     ...input.form,
     reviewDate: /^\d{1,2}\/\d{1,2}\/\d{4}$/.test((input.form.reviewDate || '').trim()) ? input.form.reviewDate.trim() : todayMDY(),
   };
-  const items = dedupeCurative(input.curativeItems || []);
+  // CNX convention: general and non-action items are simply "Advisory" unless work is still open
+  const items = dedupeCurative(input.curativeItems || []).map((it) => {
+    const sec = normSection(it.section);
+    if ((sec === SECTION_ORDER[1] || sec === SECTION_ORDER[2]) && (it.status || '').toLowerCase() !== 'open') {
+      return { ...it, recommendation: 'Advisory', status: 'advisory' };
+    }
+    return it;
+  });
   const parcels = ownership.parcels?.length ? ownership.parcels : [{ label: 'Parcel One', tmp: (core.tmps || []).join(', '), deeded_acres: core.acres_title, resolved_acres: core.acres_resolved }];
   const multi = parcels.length > 1;
   const tractNos = splitTracts(form.tractNumbers);
@@ -204,11 +267,11 @@ export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
         controlType: 'Lease',
         agreementQls: o.qls_agreement || lease.agreement_number || '',
         recording: lease.recording || '',
-        royalty: royaltyDisplay(lease.royalty_rate),
-        poolingLimit: lease.pooling_limitation || '',
-        pugh: lease.pugh || '',
-        expiration: lease.final_extension_expiration || lease.primary_term_expiration || '',
-        heldBy: o.lease_status || 'Primary Term',
+        royalty: royaltyDisplay(lease.royalty_rate, lease.gross_royalty),
+        poolingLimit: poolingDisplay(lease.pooling_limitation),
+        pugh: pughDisplay(lease.pugh),
+        expiration: lease.primary_term_expiration || lease.final_extension_expiration || '',
+        heldBy: heldByDisplay(o.lease_status),
         formations: lease.formations || '',
       };
     });
@@ -250,7 +313,7 @@ export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
       divisionOrder: numbered(dor),
     },
     tractDescription: core.tract_description || '',
-    wiTables: core.wi_tables?.length ? core.wi_tables : [{ formation: 'All formations', rows: [{ owner: 'Open', wi: '1.0', nri: 'Open', orri: 'Open' }] }],
+    wiTables: wiFromLeases(core.wi_tables, ownership, leases),
     parcels: carParcels,
     amendments: toRows(core.amendments),
     assignments: toRows(core.assignments),
@@ -509,7 +572,9 @@ export function padFromCar(car: CarData, formIn: FormInfo, leases: LeaseInfo[], 
   let ownership: OwnershipExtract;
   let allLeases: LeaseInfo[] = [...leases];
   if (aiOwnership && aiOwnership.owners?.length) {
-    ownership = aiOwnership;
+    const n = normalizeOwnership(aiOwnership, leases);
+    ownership = n.ownership;
+    allLeases = n.leases;
   } else {
     const fromCar = ownershipFromCar(car);
     ownership = fromCar.ownership;
@@ -557,4 +622,20 @@ export function padFromCar(car: CarData, formIn: FormInfo, leases: LeaseInfo[], 
       titleNotes: ownership.title_notes || '',
     }),
   };
+}
+
+/** If every owner is leased to the same lessee but the WI table still says "Open", fill it from the lease. */
+function wiFromLeases(wi: CoreExtract['wi_tables'], own: OwnershipExtract, leases: LeaseInfo[]): CarData['wiTables'] {
+  const tables = wi?.length ? wi : [{ formation: 'All formations', rows: [{ owner: 'Open', wi: '1.0', nri: 'Open', orri: 'Open' }] }];
+  const allOpen = tables.every((t) => t.rows.every((r) => /^open$/i.test((r.owner || '').trim())));
+  const owners = own.owners || [];
+  if (!allOpen || !owners.length) return tables;
+  const ls = owners.map((o) => (o.lease_index !== null && o.lease_index !== undefined ? leases[o.lease_index] : undefined));
+  if (ls.some((l) => !l)) return tables;
+  const lessees = new Set(ls.map((l) => (l!.lessee || '').trim()).filter(Boolean));
+  if (lessees.size !== 1) return tables;
+  const rates = new Set(ls.map((l) => fractionToDecimal(l!.royalty_rate)));
+  const rate = rates.size === 1 ? [...rates][0] : null;
+  const nri = rate === null ? '' : String(parseFloat((1 - (rate > 1 ? rate / 100 : rate)).toFixed(6)));
+  return [{ formation: tables[0].formation || 'All formations', rows: [{ owner: [...lessees][0], wi: '1.0', nri, orri: 'No' }] }];
 }

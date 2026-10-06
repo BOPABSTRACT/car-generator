@@ -165,6 +165,18 @@ export interface OwnerExtract {
   lease_status: string;     // Open / Primary Term / Extended Term / HBP
   qls_agreement: string;
   notes: string;
+  record_lease_index?: number | null; // index into OwnershipExtract.record_leases (lease known only from the opinion/bringdown)
+}
+
+export interface RecordLease {
+  lessors: string;
+  lessee: string;
+  effective_date: string;
+  recording: string;
+  agreement_number: string;
+  primary_term_expiration: string;
+  royalty_rate: string;
+  formations: string;
 }
 
 export interface ParcelExtract {
@@ -178,6 +190,7 @@ export interface OwnershipExtract {
   parcels: ParcelExtract[];
   owners: OwnerExtract[];
   title_notes: string;
+  record_leases?: RecordLease[];
 }
 
 export interface CuratorItemExtract {
