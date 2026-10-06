@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>User Guide - CAR &amp; Pad Summary Generator</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: Arial, sans-serif;
+      background: #F3F4F6;
+      color: #1F2937;
+      line-height: 1.7;
+    }
+    header {
+      background: #1F2937;
+      color: white;
+      padding: 2rem;
+      text-align: center;
+      border-bottom: 4px solid #D97706;
+    }
+    header h1 { font-size: 1.8rem; color: #D97706; margin-bottom: 0.5rem; }
+    header p { color: #9CA3AF; font-size: 0.95rem; }
+    .layout {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      max-width: 1100px;
+      margin: 0 auto;
+      min-height: calc(100vh - 120px);
+    }
+    aside {
+      background: white;
+      border-right: 1px solid #E5E7EB;
+      padding: 2rem 1rem;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+    }
+    aside h3 {
+      font-size: 0.7rem;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: #D97706;
+      margin-bottom: 0.75rem;
+      margin-top: 1.25rem;
+      padding-bottom: 0.25rem;
+      border-bottom: 1px solid #E5E7EB;
+    }
+    aside a {
+      display: block;
+      font-size: 0.85rem;
+      color: #4B5563;
+      text-decoration: none;
+      padding: 0.35rem 0.5rem;
+      border-radius: 4px;
+      margin-bottom: 0.1rem;
+      border-left: 2px solid transparent;
+    }
+    aside a:hover { background: #FEF3C7; color: #1F2937; border-left-color: #D97706; }
+    main { padding: 2.5rem 3rem; max-width: 820px; }
+    section { margin-bottom: 3rem; scroll-margin-top: 1.5rem; }
+    section h2 {
+      font-size: 1.4rem;
+      color: #D97706;
+      margin-bottom: 1rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 2px solid #E5E7EB;
+    }
+    section h3 { font-size: 1rem; color: #1F2937; margin: 1.25rem 0 0.5rem; font-weight: bold; }
+    section p { color: #4B5563; margin-bottom: 0.85rem; }
+    .step {
+      display: flex;
+      gap: 1rem;
+      align-items: flex-start;
+      background: white;
+      border: 1px solid #E5E7EB;
+      border-radius: 6px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 0.75rem;
+    }
+    .step-num {
+      flex-shrink: 0;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: #1F2937;
+      color: #D97706;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-size: 0.9rem;
+    }
+    .step-body strong { display: block; font-size: 0.9rem; margin-bottom: 0.25rem; }
+    .step-body p { font-size: 0.85rem; margin: 0; }
+    .tip {
+      background: white;
+      border-left: 3px solid #D97706;
+      padding: 0.85rem 1rem;
+      border-radius: 0 4px 4px 0;
+      margin: 1rem 0;
+      font-size: 0.9rem;
+      color: #4B5563;
+    }
+    .tip strong { color: #1F2937; }
+    .tip.warn { border-left-color: #DC2626; }
+    .tip.info { border-left-color: #2563EB; }
+    .conf-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin: 1rem 0; }
+    .conf-card { border-radius: 6px; padding: 1rem; border: 1px solid transparent; }
+    .conf-card.high { background: #D1FAE5; border-color: #6EE7B7; }
+    .conf-card.medium { background: #FEF3C7; border-color: #FCD34D; }
+    .conf-card.low { background: #FEE2E2; border-color: #FCA5A5; }
+    .conf-card .label { font-size: 0.75rem; font-weight: bold; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.4rem; }
+    .conf-card.high .label { color: #065F46; }
+    .conf-card.medium .label { color: #92400E; }
+    .conf-card.low .label { color: #991B1B; }
+    .conf-card p { font-size: 0.82rem; color: #4B5563; margin: 0; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+    th {
+      background: #1F2937;
+      color: #D97706;
+      padding: 0.6rem 0.85rem;
+      text-align: left;
+      font-size: 0.75rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    td { padding: 0.6rem 0.85rem; border-bottom: 1px solid #E5E7EB; color: #4B5563; vertical-align: top; }
+    tr:nth-child(even) td { background: #F9FAFB; }
+    .req { font-size: 0.68rem; font-weight: bold; color: #DC2626; text-transform: uppercase; letter-spacing: 0.06em; }
+    code { background: #E5E7EB; padding: 0.1rem 0.35rem; border-radius: 3px; font-size: 0.85em; color: #1F2937; }
+    .faq-item { border: 1px solid #E5E7EB; border-radius: 6px; margin-bottom: 0.6rem; overflow: hidden; }
+    .faq-q {
+      background: white;
+      padding: 0.85rem 1rem;
+      font-weight: bold;
+      font-size: 0.9rem;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      user-select: none;
+    }
+    .faq-q::after { content: '+'; color: #D97706; font-size: 1.1rem; }
+    .faq-q.open::after { content: '-'; }
+    .faq-a { display: none; padding: 0.75rem 1rem 0.85rem; background: white; font-size: 0.88rem; color: #4B5563; border-top: 1px solid #E5E7EB; }
+    .faq-a.open { display: block; }
+    footer { background: #1F2937; color: #6B7280; text-align: center; padding: 1.5rem; font-size: 0.82rem; }
+    footer strong { color: #D97706; }
+    @media (max-width: 700px) {
+      .layout { grid-template-columns: 1fr; }
+      aside { display: none; }
+      main { padding: 1.5rem; }
+      .conf-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>CAR &amp; Pad Summary Generator</h1>
+  <p>User Guide — BOP Abstract Internal Tool</p>
+</header>
+
+<div class="layout">
+  <aside>
+    <h3>Contents</h3>
+    <a href="#overview">Overview</a>
+    <h3>Steps</h3>
+    <a href="#step1">1. Analyst &amp; Unit</a>
+    <a href="#step2">2. Upload Documents</a>
+    <a href="#step3">3. Generate</a>
+    <a href="#step4">4. Review the CAR</a>
+    <a href="#step5">5. Review the Pad Summary</a>
+    <a href="#step6">6. Export</a>
+    <h3>Reference</h3>
+    <a href="#sources">Where Each Field Comes From</a>
+    <a href="#conventions">Recommendation Wording</a>
+    <a href="#limits">Known Limitations</a>
+    <a href="#faq">FAQ</a>
+  </aside>
+
+  <main>
+    <section id="overview">
+      <h2>Overview</h2>
+      <p>This tool drafts the CNX <strong>Curative Action Report (CAR)</strong> in the official Word form and the matching <strong>Pad Summary</strong> rows (Title-Curative and Ownership tabs) from the title opinion, Title Mapping Curative, internal bringdown, abstract and long-form leases.</p>
+      <div class="tip"><strong>It is a first draft, not a finished CAR.</strong> Every recommendation the AI writes appears in red in the Word file — the same way analyst entries are marked — so the reviewer can see exactly what to confirm.</div>
+      <div class="tip info"><strong>Your documents stay in your browser.</strong> Text is read from text-based PDFs on your own computer; only the extracted text is sent for analysis. Only scanned (image-only) PDFs are uploaded, temporarily, for OCR.</div>
+    </section>
+
+    <section id="step1">
+      <h2>Step 1 — Analyst &amp; Unit</h2>
+      <table>
+        <thead><tr><th>Field</th><th></th><th>Used for</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Analyst Name</strong></td><td><span class="req">Required</span></td><td>"Analysis Review Completed — Completed By" on the CAR.</td></tr>
+          <tr><td><strong>Analyst Initials</strong></td><td></td><td>Analyst Review Date column on the Title-Curative tab (e.g. "MJS / 9/28/2026").</td></tr>
+          <tr><td><strong>Analysis Review Date</strong></td><td></td><td>CAR review date and "Most Recent Date Checked" for wells. Blank = today.</td></tr>
+          <tr><td><strong>Pad Summary Tract #(s)</strong></td><td></td><td>Tract numbers from the unit plat, one per parcel in the order the opinion lists them (e.g. "35A, 35B").</td></tr>
+          <tr><td><strong>Unit Name / Twp-County-State / Total Acres</strong></td><td></td><td>Header block of the Ownership tab. Total Acres feeds cell B4, which the NRI formulas divide by.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="step2">
+      <h2>Step 2 — Upload Documents</h2>
+      <table>
+        <thead><tr><th>Document</th><th></th><th>What it drives</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Title Opinion</strong> (PDF)</td><td><span class="req">Required</span></td><td>Header, ownership, leasehold, encumbrances, taxes and every curative item.</td></tr>
+          <tr><td><strong>Title Mapping Curative</strong> (PDF)</td><td></td><td>FINAL Resolved Acreage, resolved acres per parcel, and survey/acreage clouds ("Satisfied by Title Mapping Curative"). If the file contains an original and a revised TMC, the revised one is used.</td></tr>
+          <tr><td><strong>Internal Bringdown</strong> (.doc, .docx or PDF)</td><td></td><td>"Internal Bringdown" row in the header, mortgage satisfactions, and any new conveyances or leases after the opinion.</td></tr>
+          <tr><td><strong>Abstract of Title</strong> (PDF)</td><td></td><td>Well information when the opinion doesn't have it. Only the cover pages and pages that mention wells are used.</td></tr>
+          <tr><td><strong>Long Form Lease(s)</strong> (PDF)</td><td></td><td>Agreement terms in the CAR ownership table and the Pad Summary Ownership tab — dates, extensions, royalty, deduct language, pooling, Pugh, etc. Upload one file per lease.</td></tr>
+        </tbody>
+      </table>
+      <div class="tip"><strong>Big files are fine.</strong> A 140-page opinion or 230-page abstract is read in a few seconds in your browser.</div>
+    </section>
+
+    <section id="step3">
+      <h2>Step 3 — Generate</h2>
+      <div class="step"><div class="step-num">1</div><div class="step-body"><strong>Read the documents</strong><p>Text is pulled from each PDF and Word file; scanned leases are OCR'd.</p></div></div>
+      <div class="step"><div class="step-num">2</div><div class="step-body"><strong>Read each lease</strong><p>Each lease is analyzed on its own for the Pad Summary lease columns.</p></div></div>
+      <div class="step"><div class="step-num">3</div><div class="step-body"><strong>Build the CAR and Pad Summary</strong><p>Four analyses run at once: header/leasehold/encumbrances, specific curative items, general items &amp; limitations, and owners by parcel. Expect 2–4 minutes.</p></div></div>
+      <div class="tip">The checklist under the button shows each step. If one step fails, the rest still finish — fill that section by hand or run it again.</div>
+    </section>
+
+    <section id="step4">
+      <h2>Step 4 — Review the CAR</h2>
+      <p>Every section of the CAR form appears as an editable panel, in the same order as the Word document. Tables have <code>+ Add row</code> and <code>Delete</code>; empty tables print "N/A".</p>
+      <div class="tip warn"><strong>Check the Curative Summary last.</strong> It is built from the items marked as open, but once you edit recommendations below it does not rebuild — update it to match.</div>
+      <div class="tip"><strong>Curative items:</strong> left box is the title defect copied from the opinion, right box is the CNX Recommendation/Status. Compare the defect text against the opinion for anything cut off at page breaks.</div>
+    </section>
+
+    <section id="step5">
+      <h2>Step 5 — Review the Pad Summary</h2>
+      <p><strong>Title-Curative tab:</strong> one row with the opinion date, title search certified date ("(BD)" when a bringdown was done), heirship, and the open Land / Third Party / Mapping / Title action items from page 1 of the CAR.</p>
+      <p><strong>Ownership tab:</strong> one row per owner per tract, columns A through BR exactly as in the unit Pad Summary. Unleased owners get "OPEN" in the lease columns. Executive and royalty interests are entered as fractions (=1/2) and the acreage / NRI columns are Excel formulas.</p>
+      <div class="tip warn"><strong>Fill column AH (Resolved Gross Tract Acres in Unit)</strong> from the unit plat after pasting — the tool can't know how much of the tract is inside the unit.</div>
+    </section>
+
+    <section id="step6">
+      <h2>Step 6 — Export</h2>
+      <div class="step"><div class="step-num">1</div><div class="step-body"><strong>Download CAR (.docx)</strong><p>The official NEW CAR FORM – 2023 filled in. File name: <code>QLS - CAR - M.D.YYYY.docx</code>.</p></div></div>
+      <div class="step"><div class="step-num">2</div><div class="step-body"><strong>Download Pad Summary rows (.xlsx)</strong><p>Same column layout as the master Pad Summary. Copy the owner rows (row 22 down) and the Title-Curative row into the unit's Pad Summary.</p></div></div>
+      <div class="step"><div class="step-num">3</div><div class="step-body"><strong>Save review session</strong><p>Saves everything you've edited to a .json file. Use "Load saved session" to pick up where you left off without re-running the AI.</p></div></div>
+    </section>
+
+    <section id="sources">
+      <h2>Where Each Field Comes From</h2>
+      <table>
+        <thead><tr><th>CAR section</th><th>Primary source</th></tr></thead>
+        <tbody>
+          <tr><td>QLS #, TMP, Township/County/State, Law Firm, Certification Range, Opinion Date, Estates, Acres Covered</td><td>Title Opinion</td></tr>
+          <tr><td>Internal Bringdown row</td><td>Bringdown</td></tr>
+          <tr><td>FINAL Resolved Acreage</td><td>Title Mapping Curative</td></tr>
+          <tr><td>Working Interest / Ownership tables</td><td>Title Opinion + Leases</td></tr>
+          <tr><td>Amendments, Assignments, ORRI, Units</td><td>Title Opinion</td></tr>
+          <tr><td>Well History</td><td>Title Opinion, then Abstract</td></tr>
+          <tr><td>Outsales (Located Y/N)</td><td>Title Opinion + TMC</td></tr>
+          <tr><td>Liens (Released Y/N)</td><td>Title Opinion + Bringdown</td></tr>
+          <tr><td>Curative Items</td><td>Title Opinion (verbatim) + recommendation from TMC / Bringdown / Leases</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="conventions">
+      <h2>Recommendation Wording</h2>
+      <p>The AI follows the wording used on prior CARs:</p>
+      <table>
+        <thead><tr><th>Opinion item</th><th>Typical recommendation</th></tr></thead>
+        <tbody>
+          <tr><td>Survey / plats don't close (TMC provided)</td><td>Satisfied by Title Mapping Curative</td></tr>
+          <tr><td>Roads / centerline</td><td>Advisory. Typically, the oil and gas runs to the centerline of an adjacent roadway unless otherwise specifically stated.</td></tr>
+          <tr><td>No current CNX lease</td><td>Leasehold is open. Land to execute a new lease with current oil and gas owners… and place of record in ___ County.</td></tr>
+          <tr><td>Old unreleased leases, no wells found</td><td>Satisfied. A review of PADEP and ___ Recorder indicates that there are no old wells or leases holding the subject parcel…</td></tr>
+          <tr><td>Mortgage released in bringdown</td><td>Satisfied. Mtg was satisfied and released in ___</td></tr>
+          <tr><td>Old gaps / tax sale records</td><td>Waived based on passage of time and lack of adverse claims against the subject parcels.</td></tr>
+          <tr><td>Aliases, general items, non-action items</td><td>Advisory</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="limits">
+      <h2>Known Limitations</h2>
+      <div class="tip warn"><strong>Instrument numbers for releases</strong> are often not in the bringdown text — look them up and add them to the Liens table.</div>
+      <div class="tip warn"><strong>"Lease in Other CNX Units?", BA #, QDO codes and Land Ops / D.O. approval columns</strong> are internal CNX data and are left blank.</div>
+      <div class="tip"><strong>Scanned leases</strong> need the Google Document AI settings (same as the Run Sheet Generator). Text-based leases work without them.</div>
+    </section>
+
+    <section id="faq">
+      <h2>FAQ</h2>
+      <div class="faq-item">
+        <div class="faq-q">Can I change the CAR template?</div>
+        <div class="faq-a">Yes — replace <code>templates/car-template.docx</code> in the GitHub repo with the new form. Keep the table headings the same so the tool can find each table.</div>
+      </div>
+      <div class="faq-item">
+        <div class="faq-q">There are hundreds of owners — will it work?</div>
+        <div class="faq-a">Yes. Owners are extracted in one compact pass and each owner's lease is matched by lessor name and parcel. Check the Ownership tab row count against the opinion.</div>
+      </div>
+      <div class="faq-item">
+        <div class="faq-q">Is my data stored anywhere?</div>
+        <div class="faq-a">No database. Text-based PDFs never leave your browser — only their text is sent for analysis. Scanned PDFs are uploaded temporarily for OCR. Use "Save review session" if you want to keep your edits.</div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer>
+  <strong>BOP Abstract</strong> &nbsp;·&nbsp; CAR &amp; Pad Summary Generator &nbsp;·&nbsp; Internal Use Only
+</footer>
+
+<script>
+  document.querySelectorAll('.faq-q').forEach(function(q) {
+    q.addEventListener('click', function() {
+      q.classList.toggle('open');
+      q.nextElementSibling.classList.toggle('open');
+    });
+  });
+</script>
+
+</body>
+</html>
