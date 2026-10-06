@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { upload } from '@vercel/blob/client';
 import { pdfPages } from '@/lib/pdf-text';
 import { stripRunningHeaders, joinPages, abstractExcerpt, textCoverage } from '@/lib/text-clean';
-import { assemble } from '@/lib/assemble';
+import { assemble, mergeCurative, normalizeCar } from '@/lib/assemble';
 import { OWNERSHIP_COLUMNS, TITLE_CURATIVE_COLUMNS } from '@/lib/pad-columns';
 import type {
   CarData, PadData, FormInfo, LeaseInfo, CoreExtract, CurativeExtract, OwnershipExtract,
@@ -136,7 +136,7 @@ export default function Home() {
 
   async function generate() {
     if (!opinionFile) { showStatus('Please upload the Title Opinion PDF', 'error'); return; }
-    const reviewDate = form.reviewDate || todayMDY();
+    const reviewDate = /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(form.reviewDate.trim()) ? form.reviewDate.trim() : todayMDY();
     const f: FormInfo = { ...form, reviewDate };
     setForm(f);
 
@@ -211,7 +211,7 @@ export default function Home() {
       const own = val<OwnershipExtract>(3);
       if (!core) throw new Error('The header/leasehold step failed — see the error above and try again.');
 
-      const items: CuratorItemExtract[] = [...(cur1?.items || []), ...(cur2?.items || [])];
+      const items: CuratorItemExtract[] = mergeCurative(cur1?.items || [], cur2?.items || []);
       const built = assemble({
         form: f,
         core,
@@ -271,7 +271,7 @@ export default function Home() {
     try {
       const data = JSON.parse(await file.text());
       if (data.form) setForm({ ...emptyForm, ...data.form });
-      if (data.car) setCar(data.car);
+      if (data.car) setCar(normalizeCar(data.car));
       if (data.pad) setPad(data.pad);
       showStatus(`Loaded ${file.name}`, 'success');
     } catch { showStatus('That file is not a saved review session', 'error'); }
