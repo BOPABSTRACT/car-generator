@@ -61,6 +61,83 @@ function normSection(s: string): string {
   return u || 'OTHER ITEMS';
 }
 
+/** Claude sometimes returns table rows as objects keyed by header — convert everything to string[][]. */
+export function toRows(v: unknown): string[][] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map((r) => {
+      if (Array.isArray(r)) return r.map((x) => (x === null || x === undefined ? '' : String(x)));
+      if (r && typeof r === 'object') return Object.values(r as Record<string, unknown>).map((x) => (x === null || x === undefined ? '' : String(x)));
+      if (typeof r === 'string') return [r];
+      return [];
+    })
+    .filter((r) => r.length > 0);
+}
+
+/** Makes a CarData safe to export (also repairs sessions saved by older versions). */
+export function normalizeCar(car: CarData): CarData {
+  const c = { ...car };
+  c.amendments = toRows(c.amendments);
+  c.assignments = toRows(c.assignments);
+  c.orri = toRows(c.orri);
+  c.units = toRows(c.units);
+  c.wells = toRows(c.wells);
+  c.outsales = toRows(c.outsales);
+  c.liens = toRows(c.liens);
+  c.unassessed = toRows(c.unassessed);
+  c.delinquent = toRows(c.delinquent);
+  c.opinions = Array.isArray(c.opinions) ? c.opinions : [];
+  c.wiTables = Array.isArray(c.wiTables) ? c.wiTables : [];
+  c.parcels = Array.isArray(c.parcels) ? c.parcels : [];
+  c.curativeSections = (Array.isArray(c.curativeSections) ? c.curativeSections : []).map((sec) => ({
+    title: sec.title || '',
+    items: (sec.items || []).map((i) => ({ defect: String(i.defect ?? ''), recommendation: String(i.recommendation ?? '') })),
+  }));
+  return c;
+}
+
+const SPECIFIC_SECTIONS = new Set([SECTION_ORDER[0], SECTION_ORDER[4]]);
+
+function dedupeKey(defect: string): string {
+  return (defect || '')
+    .replace(/^\s*((specific|general|non-action|non action)[^:\n]*item\s*\d+\s*:|\d+\.)\s*/i, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 160);
+}
+
+/**
+ * Merge the two curative passes: the "specific" pass owns SPECIFIC + BRINGDOWN items, the "other" pass owns
+ * GENERAL / NON-ACTION / COMMENTS. Anything a pass returned outside its scope is dropped, then exact repeats removed.
+ */
+export function mergeCurative(specific: CuratorItemExtract[], other: CuratorItemExtract[]): CuratorItemExtract[] {
+  const a = (specific || []).filter((i) => SPECIFIC_SECTIONS.has(normSection(i.section)));
+  const b = (other || []).filter((i) => !SPECIFIC_SECTIONS.has(normSection(i.section)));
+  const seen = new Set<string>();
+  const out: CuratorItemExtract[] = [];
+  for (const it of [...a, ...b]) {
+    const k = normSection(it.section) + '|' + dedupeKey(it.defect);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(it);
+  }
+  return out;
+}
+
+/** Remove repeated items (same section + same text), keeping the first. */
+export function dedupeCurative(items: CuratorItemExtract[]): CuratorItemExtract[] {
+  const seen = new Set<string>();
+  return (items || []).filter((it) => {
+    const k = normSection(it.section) + '|' + dedupeKey(it.defect);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+function todayMDY(): string {
+  const d = new Date();
+  return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
+}
+
 export function buildCurativeSections(items: CuratorItemExtract[]): CurativeSection[] {
   const map = new Map<string, CurativeSection>();
   for (const it of items) {
@@ -96,8 +173,12 @@ export interface AssembleInput {
 }
 
 export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
-  const { form, core, ownership, leases } = input;
-  const items = input.curativeItems || [];
+  const { core, ownership, leases } = input;
+  const form: FormInfo = {
+    ...input.form,
+    reviewDate: /^\d{1,2}\/\d{1,2}\/\d{4}$/.test((input.form.reviewDate || '').trim()) ? input.form.reviewDate.trim() : todayMDY(),
+  };
+  const items = dedupeCurative(input.curativeItems || []);
   const parcels = ownership.parcels?.length ? ownership.parcels : [{ label: 'Parcel One', tmp: (core.tmps || []).join(', '), deeded_acres: core.acres_title, resolved_acres: core.acres_resolved }];
   const multi = parcels.length > 1;
   const tractNos = splitTracts(form.tractNumbers);
@@ -171,19 +252,19 @@ export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
     tractDescription: core.tract_description || '',
     wiTables: core.wi_tables?.length ? core.wi_tables : [{ formation: 'All formations', rows: [{ owner: 'Open', wi: '1.0', nri: 'Open', orri: 'Open' }] }],
     parcels: carParcels,
-    amendments: core.amendments || [],
-    assignments: core.assignments || [],
-    orri: core.orri || [],
-    units: core.units || [],
+    amendments: toRows(core.amendments),
+    assignments: toRows(core.assignments),
+    orri: toRows(core.orri),
+    units: toRows(core.units),
     wellDateChecked: core.well_date_checked || form.reviewDate || '',
     leaseWideGaps: core.lease_wide_gaps || 'N/A',
-    wells: core.wells || [],
-    outsales: core.outsales || [],
-    liens: core.liens || [],
+    wells: toRows(core.wells),
+    outsales: toRows(core.outsales),
+    liens: toRows(core.liens),
     taxFullyAssessed: core.tax_fully_assessed || '',
     taxDelinquent: core.tax_delinquent || 'N/A',
-    unassessed: core.unassessed || [],
-    delinquent: core.delinquent || [],
+    unassessed: toRows(core.unassessed),
+    delinquent: toRows(core.delinquent),
     contracts: {
       agreementNumber: core.contracts?.agreement_number || 'N/A',
       name: core.contracts?.name || '',
