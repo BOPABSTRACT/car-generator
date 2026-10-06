@@ -140,6 +140,15 @@ Return ONE JSON object with exactly these string fields:
 ${text}
 </lease_text>`;
   const out = await runJson<LeaseInfo>(prompt, 8000);
+  // CNX agreement packages are named "307422-000 - Support Document - ..." — that QLS number is the agreement # analysts use
+  const qls = filename.match(/(?:^|[^\d])(\d{6})-(\d{3})(?!\d)/);
+  if (qls) {
+    const fromFile = `${qls[1]}${qls[2]}`;
+    if (out.agreement_number && out.agreement_number.replace(/\D/g, '') !== fromFile) {
+      out.notes_for_reviewer = [out.notes_for_reviewer, `Lease shows agreement/QLA no. ${out.agreement_number}; using QLS ${fromFile} from the file name.`].filter(Boolean).join(' ');
+    }
+    out.agreement_number = fromFile;
+  }
   return { ...out, source_file: filename };
 }
 
@@ -212,6 +221,7 @@ CNX ANALYST CONVENTIONS (follow these closely):
 - Items needing a legal judgment call (questionable reservation, unclear vesting, quiet title validity): open, team title, recommendation beginning "Title Professional Review requested to determine ...".
 - GENERAL curative items and NON-ACTION items: recommendation is exactly "Advisory" (status advisory) — do not add explanations, even for road or gap items in these sections.
 - COMMENTS AND LIMITATIONS: return ONE item whose defect contains all of the numbered comments/limitations (each on its own line, keep numbering) and recommendation "".
+- NON-ACTION CURATIVE ITEMS: return EACH numbered non-action item ("1.", "2.", "3." ...) as its OWN item — never combine them. Only COMMENTS AND LIMITATIONS is combined into one item.
 - INTERNAL BRINGDOWN ITEMS: only if the internal bringdown shows conveyances, leases, easements or encumbrances recorded after the opinion's certification date that are NOT already addressed by an opinion item (a mortgage satisfaction is addressed under the mortgage item instead). Defect = description from the bringdown; give a recommendation.`;
 
 export async function extractCurative(s: SourceTexts, part: 'specific' | 'other'): Promise<CurativeExtract> {

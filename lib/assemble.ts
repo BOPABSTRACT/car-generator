@@ -235,7 +235,7 @@ export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
     reviewDate: /^\d{1,2}\/\d{1,2}\/\d{4}$/.test((input.form.reviewDate || '').trim()) ? input.form.reviewDate.trim() : todayMDY(),
   };
   // CNX convention: general and non-action items are simply "Advisory" unless work is still open
-  const items = dedupeCurative(input.curativeItems || []).map((it) => {
+  const items = dedupeCurative(splitNumberedItems(input.curativeItems || [])).map((it) => {
     const sec = normSection(it.section);
     if ((sec === SECTION_ORDER[1] || sec === SECTION_ORDER[2]) && (it.status || '').toLowerCase() !== 'open') {
       return { ...it, recommendation: 'Advisory', status: 'advisory' };
@@ -266,7 +266,7 @@ export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
         royaltyOwnership: decimalString(o.royalty_fraction),
         controlType: 'Lease',
         agreementQls: o.qls_agreement || lease.agreement_number || '',
-        recording: lease.recording || '',
+        recording: (lease.recording || '').replace(/^\s*(instr(ument)?\.?\s*(no\.?|number)?\s*#?\s*)/i, ''),
         royalty: royaltyDisplay(lease.royalty_rate, lease.gross_royalty),
         poolingLimit: poolingDisplay(lease.pooling_limitation),
         pugh: pughDisplay(lease.pugh),
@@ -638,4 +638,28 @@ function wiFromLeases(wi: CoreExtract['wi_tables'], own: OwnershipExtract, lease
   const rate = rates.size === 1 ? [...rates][0] : null;
   const nri = rate === null ? '' : String(parseFloat((1 - (rate > 1 ? rate / 100 : rate)).toFixed(6)));
   return [{ formation: tables[0].formation || 'All formations', rows: [{ owner: [...lessees][0], wi: '1.0', nri, orri: 'No' }] }];
+}
+
+/**
+ * Non-action items are numbered "1.", "2.", ... in the opinion and each gets its own CAR row.
+ * If the AI returned several of them in one item, split them back apart.
+ */
+export function splitNumberedItems(items: CuratorItemExtract[]): CuratorItemExtract[] {
+  const out: CuratorItemExtract[] = [];
+  for (const it of items) {
+    if (normSection(it.section) !== SECTION_ORDER[2]) { out.push(it); continue; }
+    const lines = (it.defect || '').split('\n');
+    const starts: number[] = [];
+    let expect = 1;
+    lines.forEach((l, i) => {
+      const m = l.trim().match(/^(\d+)\.\s/);
+      if (m && parseInt(m[1], 10) === expect) { starts.push(i); expect++; }
+    });
+    if (starts.length < 2 || starts[0] !== 0) { out.push(it); continue; }
+    starts.forEach((st, k) => {
+      const end = k + 1 < starts.length ? starts[k + 1] : lines.length;
+      out.push({ ...it, defect: lines.slice(st, end).join('\n').trim() });
+    });
+  }
+  return out;
 }
