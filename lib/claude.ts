@@ -152,7 +152,7 @@ export async function extractCore(s: SourceTexts): Promise<CoreExtract> {
 SOURCE PRIORITY: the title opinion is the primary source. Use the Title Mapping Curative (TMC) for resolved acreage, outsale locations and survey matters. Use the internal bringdown for anything recorded after the opinion's certification date (new conveyances, leases, mortgage satisfactions). Use abstract excerpts only for well information missing from the opinion. Use the lease summaries for lease terms.
 If the TMC contains more than one version (e.g. an original and a "(Revised)" TMC), use the most recent / revised version.
 
-Return ONE JSON object with these fields (strings unless noted; tables are arrays of string arrays in the column order given; use [] when the opinion reports none):
+Return ONE JSON object with these fields (strings unless noted). TABLES MUST BE ARRAYS OF ARRAYS OF STRINGS in the column order given — e.g. "liens": [["202508584\\n(5886/70)", "9/12/2025\\n9/19/2025", "...", "$113,900.00", "Yes", "..."]] — never arrays of objects. Use [] when the opinion reports none:
 - qls: Title Opinion / QLS number, e.g. "306981-000"
 - tmps: array of tax map parcel numbers WITHOUT county/district prefix, e.g. ["240.06-01-11","240.06-01-12"]
 - township, county, state (state spelled out, e.g. "Pennsylvania")
@@ -193,7 +193,7 @@ ${allSources(s, true)}`;
 // ---------------------------------------------------------------------------
 const CURATIVE_RULES = `For each item return:
 - section: "SPECIFIC CURATIVE ACTION ITEMS" | "GENERAL CURATIVE ACTION ITEMS" | "NON-ACTION CURATIVE ITEMS" | "COMMENTS AND LIMITATIONS" | "INTERNAL BRINGDOWN ITEMS" (map the law firm's own headings — e.g. "Requirements", "Title Requirements", "Advisory Comments" — onto the closest of these)
-- defect: the item VERBATIM from the opinion, starting with its label line (e.g. "Specific Curative Action Item 1:") followed by "\\n", then the body, then "\\nRecommendations:\\n" and the recommendation text if the opinion has one. Keep paragraph breaks as "\\n". Remove page headers/footers that interrupt the text (letter addressee, date and "Page N" lines) and footnote markers. Do not summarize.
+- defect: the item VERBATIM from the opinion, starting with its label exactly as the opinion prints it (e.g. "Specific Curative Action Item 1:" or "1." — never invent a label) followed by "\\n", then the body, then "\\nRecommendations:\\n" and the recommendation text if the opinion has one. Keep paragraph breaks as "\\n". Remove page headers/footers that interrupt the text (letter addressee, date and "Page N" lines) and footnote markers. Do not summarize.
 - recommendation: the CNX Recommendation/Status, written the way a CNX title analyst would (see conventions)
 - status: "open" (work remains), "satisfied", "advisory" or "waived"
 - team: who must act on an OPEN item — "land" (leasing, subordinations, releases, well checks, heirship/affidavits), "mapping" (survey / Title Mapping Curative), "title" (attorney/title professional review, supplemental opinion, quiet title), "division_order" (pay/suspense/ownership-for-payment issues), "third_party" (outside operators/lessees), or "none" when not open
@@ -216,8 +216,8 @@ CNX ANALYST CONVENTIONS (follow these closely):
 
 export async function extractCurative(s: SourceTexts, part: 'specific' | 'other'): Promise<CurativeExtract> {
   const scope = part === 'specific'
-    ? 'Return ONLY the SPECIFIC curative action items / title requirements (the tract-specific requirements), plus any INTERNAL BRINGDOWN ITEMS.'
-    : 'Return ONLY the GENERAL curative action items, the NON-ACTION curative items, and the COMMENTS AND LIMITATIONS. Also return "misc_notes": any additional title notes the analyst should record (or "None").';
+    ? 'Return ONLY the SPECIFIC curative action items / title requirements (the tract-specific requirements), plus any INTERNAL BRINGDOWN ITEMS. Do NOT include general items, non-action items or comments/limitations — another pass handles those. Each opinion item appears exactly once.'
+    : 'Return ONLY the GENERAL curative action items, the NON-ACTION curative items, and the COMMENTS AND LIMITATIONS. Do NOT include specific items. Each opinion item appears exactly once — never repeat an item. Also return "misc_notes": any additional title notes the analyst should record (or "None").';
   const prompt = `List the curative items from the title opinion for the "CURATIVE ITEMS AND RECOMMENDATIONS" table of the CNX Curative Action Report, in the order they appear in the opinion. Analyst review date: ${s.reviewDate || 'today'}.
 
 ${scope}
