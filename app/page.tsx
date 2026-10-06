@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { upload } from '@vercel/blob/client';
 import { pdfPages } from '@/lib/pdf-text';
 import { stripRunningHeaders, joinPages, abstractExcerpt, textCoverage } from '@/lib/text-clean';
-import { assemble, mergeCurative, normalizeCar } from '@/lib/assemble';
+import { assemble, mergeCurative, normalizeCar, padFromCar } from '@/lib/assemble';
 import { OWNERSHIP_COLUMNS, TITLE_CURATIVE_COLUMNS } from '@/lib/pad-columns';
 import type {
   CarData, PadData, FormInfo, LeaseInfo, CoreExtract, CurativeExtract, OwnershipExtract,
@@ -65,7 +65,9 @@ export default function Home() {
   const [passwordInput, setPasswordInput] = useState('');
   const [passwordError, setPasswordError] = useState(false);
 
+  const [mode, setMode] = useState<'choose' | 'car' | 'pad'>('choose');
   const [form, setForm] = useState<FormInfo>({ ...emptyForm });
+  const [carDocFile, setCarDocFile] = useState<File | null>(null);
   const [opinionFile, setOpinionFile] = useState<File | null>(null);
   const [tmcFile, setTmcFile] = useState<File | null>(null);
   const [bringdownFile, setBringdownFile] = useState<File | null>(null);
@@ -237,6 +239,96 @@ export default function Home() {
     }
   }
 
+  // ---------------- Pad Summary from an existing CAR ----------------
+  async function generatePad() {
+    if (!carDocFile) { showStatus('Please upload the completed CAR (.docx)', 'error'); return; }
+    const reviewDate = /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(form.reviewDate.trim()) ? form.reviewDate.trim() : todayMDY();
+    const f: FormInfo = { ...form, reviewDate };
+    setForm(f);
+    const initial: Step[] = [
+      { id: 'cardoc', label: `CAR — ${carDocFile.name}`, status: 'pending' },
+      { id: 'opinion', label: opinionFile ? `Title Opinion — ${opinionFile.name}` : 'Title Opinion (not provided — owners taken from the CAR)', status: opinionFile ? 'pending' : 'skipped' },
+      { id: 'tmc', label: tmcFile ? `Title Mapping Curative — ${tmcFile.name}` : 'Title Mapping Curative (not provided)', status: tmcFile ? 'pending' : 'skipped' },
+      ...leaseFiles.map((lf, i) => ({ id: `lease-${i}`, label: `Lease — ${lf.name}`, status: 'pending' as StepStatus })),
+      ...(opinionFile ? [{ id: 'own', label: 'Owners, addresses and acres by parcel', status: 'pending' as StepStatus }] : []),
+    ];
+    setSteps(initial);
+    setIsProcessing(true);
+    setCar(null);
+    setPad(null);
+    setReviewNotes([]);
+    showStatus('Reading the CAR…', 'info');
+    try {
+      stepSet('cardoc', 'running', 'reading tables…');
+      const fd = new FormData();
+      fd.append('file', carDocFile);
+      const res = await fetch('/api/parse-car', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || 'Could not read the CAR');
+      const parsed = normalizeCar(data.car as CarData);
+      const ownerCount = parsed.parcels.reduce((n, p) => n + p.owners.length, 0);
+      stepSet('cardoc', 'done', `${parsed.qls} — ${parsed.parcels.length} parcel(s), ${ownerCount} owner row(s)`);
+
+      const [opinion, tmc] = await Promise.all([
+        opinionFile ? readPdf(opinionFile, 'opinion', 'full').catch((e) => { stepSet('opinion', 'error', e.message); return ''; }) : Promise.resolve(''),
+        tmcFile ? readPdf(tmcFile, 'tmc', 'full').catch((e) => { stepSet('tmc', 'error', e.message); return ''; }) : Promise.resolve(''),
+      ]);
+
+      showStatus('Analyzing leases…', 'info');
+      const leaseResults = await Promise.all(leaseFiles.map(async (lf, i) => {
+        const id = `lease-${i}`;
+        try {
+          const text = await readPdf(lf, id, 'full');
+          stepSet(id, 'running', 'extracting lease terms…');
+          const { result } = await postJson<{ result: LeaseInfo }>('/api/analyze', { task: 'lease', text, filename: lf.name, reviewDate });
+          stepSet(id, 'done', `${result.lessors || 'lease'} — ${result.effective_date || ''}`);
+          return result;
+        } catch (e) {
+          stepSet(id, 'error', e instanceof Error ? e.message : String(e));
+          return null;
+        }
+      }));
+      const leases = leaseResults.filter(Boolean) as LeaseInfo[];
+
+      let aiOwnership: OwnershipExtract | null = null;
+      if (opinion) {
+        showStatus('Matching owners, addresses and acreage from the title opinion…', 'info');
+        stepSet('own', 'running', 'analyzing…');
+        try {
+          const { result } = await postJson<{ result: OwnershipExtract }>('/api/analyze', {
+            task: 'ownership', sources: { opinion, tmc, bringdown: '', abstract: '', leases, reviewDate },
+          });
+          aiOwnership = result;
+          stepSet('own', 'done', `${result.owners?.length || 0} owner row(s)`);
+        } catch (e) {
+          stepSet('own', 'error', `${e instanceof Error ? e.message : String(e)} — using the CAR's owner tables instead`);
+        }
+      }
+
+      if (!f.analyst && parsed.analyst) setForm((x) => ({ ...x, analyst: parsed.analyst }));
+      setCar(parsed);
+      setPad(padFromCar(parsed, f, leases, aiOwnership));
+      const notes: string[] = [];
+      if (!aiOwnership) notes.push('Owner addresses (column J) and per-parcel acres (AF/AG) are not on the CAR — add the Title Opinion and TMC to fill them, or type them in below.');
+      leases.forEach((l) => { if (l.notes_for_reviewer) notes.push(`${l.source_file}: ${l.notes_for_reviewer}`); });
+      setReviewNotes(notes);
+      showStatus('Pad Summary rows are ready. Review and edit below, then export.', 'success');
+    } catch (e) {
+      showStatus(`Failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
+    } finally {
+      setIsProcessing(false);
+    }
+  }
+
+  function startOver(next: 'choose' | 'car' | 'pad') {
+    setMode(next);
+    setSteps([]);
+    setStatus(null);
+    setReviewNotes([]);
+    setCar(null);
+    setPad(null);
+  }
+
   async function exportCar() {
     if (!car) return;
     setIsExporting(true);
@@ -258,7 +350,7 @@ export default function Home() {
   }
 
   function saveSession() {
-    const blob = new Blob([JSON.stringify({ form, car, pad }, null, 1)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ mode, form, car, pad }, null, 1)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `${car?.qls || 'CAR'} - review session.json`;
@@ -270,6 +362,7 @@ export default function Home() {
     if (!file) return;
     try {
       const data = JSON.parse(await file.text());
+      if (data.mode === 'car' || data.mode === 'pad') setMode(data.mode);
       if (data.form) setForm({ ...emptyForm, ...data.form });
       if (data.car) setCar(normalizeCar(data.car));
       if (data.pad) setPad(data.pad);
@@ -301,12 +394,42 @@ export default function Home() {
     );
   }
 
+  if (mode === 'choose') {
+    return (
+      <div className="container">
+        <a href="/user-guide.html" target="_blank" rel="noopener noreferrer" className="help-btn">User Guide</a>
+        <h1>{'Curative Action Report & Pad Summary Generator'}</h1>
+        <p style={{ textAlign: 'center', color: '#4B5563', marginTop: -10, marginBottom: 28 }}>{'What would you like to do?'}</p>
+        <div className="mode-grid">
+          <button className="mode-card" onClick={() => startOver('car')}>
+            <span className="mode-title">{'Create a new CAR'}</span>
+            <span className="mode-desc">{'Build the Curative Action Report and the Pad Summary rows from the title opinion, TMC, bringdown, abstract and leases.'}</span>
+          </button>
+          <button className="mode-card" onClick={() => startOver('pad')}>
+            <span className="mode-title">{'Pad Summary from an existing CAR'}</span>
+            <span className="mode-desc">{'Upload a completed CAR (.docx) and the leases to build only the Pad Summary Ownership and Title-Curative rows.'}</span>
+          </button>
+        </div>
+        <div style={{ textAlign: 'center', marginTop: 24 }}>
+          <label className="btn-small" style={{ cursor: 'pointer' }}>
+            {'Load saved session'}
+            <input type="file" accept=".json" style={{ display: 'none' }} onChange={(e) => { setMode('car'); loadSession(e.target.files?.[0]); }} />
+          </label>
+        </div>
+      </div>
+    );
+  }
+
   const done = steps.filter((s) => ['done', 'error', 'skipped'].includes(s.status)).length;
+  const padOnly = mode === 'pad';
 
   return (
     <div className="container">
       <a href="/user-guide.html" target="_blank" rel="noopener noreferrer" className="help-btn">User Guide</a>
-      <h1>{'Curative Action Report & Pad Summary Generator'}</h1>
+      <h1>{padOnly ? 'Pad Summary from an Existing CAR' : 'Create a New CAR & Pad Summary'}</h1>
+      <div style={{ textAlign: 'center', marginTop: -18, marginBottom: 10 }}>
+        <button className="btn-small" onClick={() => startOver('choose')} disabled={isProcessing}>{'← Back to start'}</button>
+      </div>
 
       <h2>{'1. Analyst & Unit'}</h2>
       <div className="grid-2">
@@ -320,6 +443,41 @@ export default function Home() {
       <Field label="Unit Township/County/State" value={form.unitTwpCountyState} onChange={setF('unitTwpCountyState')} placeholder="e.g., Kiskiminetas/Armstrong/PA" />
 
       <h2>{'2. Source Documents'}</h2>
+      {padOnly ? (
+        <>
+          <div className="grid-2">
+            <div className="form-group">
+              <label>{'Completed CAR (.docx) *'}</label>
+              <input type="file" accept=".docx" onChange={(e) => setCarDocFile(e.target.files?.[0] || null)} />
+              <div className="hint">{'Title-Curative tab and the owners/interests by parcel come from the CAR.'}</div>
+            </div>
+            <div className="form-group">
+              <label>{'Long Form Lease(s) (PDF, one file per lease)'}</label>
+              <input type="file" accept=".pdf" multiple onChange={(e) => setLeaseFiles(Array.from(e.target.files || []))} />
+              <div className="hint">{'Lease dates, extensions, royalty, deduct language, pooling, Pugh, etc.'}</div>
+            </div>
+            <div className="form-group">
+              <label>{'Title Opinion (PDF) — optional'}</label>
+              <input type="file" accept=".pdf" onChange={(e) => setOpinionFile(e.target.files?.[0] || null)} />
+              <div className="hint">{'Adds owner addresses and per-parcel deeded acres (not on the CAR).'}</div>
+            </div>
+            <div className="form-group">
+              <label>{'Title Mapping Curative (PDF) — optional'}</label>
+              <input type="file" accept=".pdf" onChange={(e) => setTmcFile(e.target.files?.[0] || null)} />
+              <div className="hint">{'Adds resolved acres per parcel (used with the Title Opinion).'}</div>
+            </div>
+          </div>
+          <div className="button-group">
+            <button className="btn-real" onClick={generatePad} disabled={isProcessing}>
+              {isProcessing ? 'Processing…' : 'Generate Pad Summary'}
+            </button>
+            <label className="btn-load">
+              {'Load saved session'}
+              <input type="file" accept=".json" style={{ display: 'none' }} onChange={(e) => loadSession(e.target.files?.[0])} />
+            </label>
+          </div>
+        </>
+      ) : (<>
       <div className="grid-2">
         <div className="form-group">
           <label>{'Title Opinion (PDF) *'}</label>
@@ -357,6 +515,7 @@ export default function Home() {
           <input type="file" accept=".json" style={{ display: 'none' }} onChange={(e) => loadSession(e.target.files?.[0])} />
         </label>
       </div>
+      </>)}
 
       {steps.length > 0 && (
         <>
@@ -379,6 +538,7 @@ export default function Home() {
 
       {car && pad && (
         <div>
+          {!padOnly && (<>
           <h2>{'3. Review & Edit — Curative Action Report'}</h2>
 
           <Section title="Header">
@@ -513,7 +673,9 @@ export default function Home() {
             </div>
           </Section>
 
-          <h2>{'4. Review & Edit — Pad Summary'}</h2>
+          </>)}
+
+          <h2>{padOnly ? '3. Review & Edit — Pad Summary' : '4. Review & Edit — Pad Summary'}</h2>
           <Section title="Title-Curative tab">
             <div className="grid-3">
               {TITLE_CURATIVE_COLUMNS.map((c) => (
@@ -533,9 +695,9 @@ export default function Home() {
             />
           </Section>
 
-          <h2>{'5. Export'}</h2>
+          <h2>{padOnly ? '4. Export' : '5. Export'}</h2>
           <div className="button-group">
-            <button className="btn-export" onClick={exportCar} disabled={isExporting}>{'Download CAR (.docx)'}</button>
+            {!padOnly && <button className="btn-export" onClick={exportCar} disabled={isExporting}>{'Download CAR (.docx)'}</button>}
             <button className="btn-export" onClick={exportPad} disabled={isExporting}>{'Download Pad Summary rows (.xlsx)'}</button>
             <button className="btn-demo" onClick={saveSession}>{'Save review session'}</button>
           </div>

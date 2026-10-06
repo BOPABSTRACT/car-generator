@@ -223,6 +223,11 @@ export default function RootLayout({
           .step-done .step-icon { color: #059669; }
           .step-error, .step-error .step-detail { color: #B91C1C; white-space: normal; }
           .step-skipped { color: #9CA3AF; }
+          .mode-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+          button.mode-card { display: flex; flex-direction: column; gap: 10px; text-align: left; padding: 28px 26px; background: white; color: #1F2937; border: 2px solid #E5E7EB; border-left: 6px solid #D97706; border-radius: 8px; font-weight: normal; }
+          button.mode-card:hover { border-color: #D97706; box-shadow: 0 4px 14px rgba(0,0,0,0.08); }
+          .mode-title { font-size: 20px; font-weight: bold; color: #D97706; }
+          .mode-desc { font-size: 14px; line-height: 1.5; color: #4B5563; }
           .help-btn:hover {
             background: #D97706;
             color: #1F2937;
