@@ -54,12 +54,34 @@ export function textCoverage(pages: string[]): number {
 
 const WELL_RE = /\b(API|well|wells|permit|plugg|spud|operator|production|PADEP|DEP|completion|gas well|oil well)\b/i;
 
-/** Abstract excerpts: cover sheet / certification pages plus any page that talks about wells. */
-export function abstractExcerpt(pages: string[], maxChars = 100000): string {
+/** Abstract excerpts: cover sheet / certification pages, any page that talks about wells, plus the given extra pages. */
+export function abstractExcerpt(pages: string[], maxChars = 150000, extra: number[] = []): string {
+  const keep = new Set(extra);
   return joinPages(pages, {
     maxChars,
-    filter: (t, i) => i < 4 || WELL_RE.test(t),
+    minChars: 20,
+    filter: (t, i) => i < 4 || keep.has(i) || (t.trim().length >= 60 && WELL_RE.test(t)),
   });
+}
+
+const WELL_TAB = /\bwells?\s*(map|info(rmation)?|research|records?|data|details?|search|report|list|history)\b/i;
+
+/**
+ * Scanned pages in the abstract's well section (e.g. a Daxton Irving "Well Information" sheet that is only an image).
+ * Finds the "Well Map" / "Well Information" exhibit tab in the back part of the abstract and returns the following
+ * pages that have no usable text, so they can be read from the page image. [] when there is no well section.
+ */
+export function wellSectionScannedPages(pages: string[], max = 10): number[] {
+  let start = -1;
+  for (let i = Math.floor(pages.length * 0.3); i < pages.length; i++) {
+    if (WELL_TAB.test(pages[i].trim().slice(0, 300))) { start = i; break; }
+  }
+  if (start < 0) return [];
+  const out: number[] = [];
+  for (let i = start + 1; i < pages.length && out.length < max; i++) {
+    if (pages[i].trim().length < 200) out.push(i);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

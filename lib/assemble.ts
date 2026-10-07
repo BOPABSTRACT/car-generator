@@ -38,6 +38,22 @@ export function decimalString(f: string): string {
   return parseFloat(d.toFixed(8)).toString();
 }
 
+/**
+ * CAR ownership tables: fraction on top, decimal right below it in the same box.
+ * "1/2" → "1/2\n0.5", "0.5" → "1/2\n0.5", "1" → "1/1\n1.0". Unparseable values are returned as-is.
+ */
+export function fractionAndDecimal(v: string): string {
+  const raw = (v || '').trim();
+  if (!raw) return '';
+  const first = raw.split('\n')[0].trim();
+  const d = fractionToDecimal(first);
+  if (d === null) return raw;
+  let frac = /\//.test(first) ? first.replace(/\s*\/\s*/, '/') : decimalToFraction(first);
+  if (!/\//.test(frac)) frac = Number.isInteger(d) ? `${d}/1` : '';
+  const dec = decimalString(String(d));
+  return frac ? `${frac}\n${dec}` : dec;
+}
+
 /** CAR style: "0.15 (Gross)" */
 function royaltyDisplay(rate: string, gross?: string): string {
   const d = fractionToDecimal(rate);
@@ -173,7 +189,15 @@ function dedupeKey(defect: string): string {
  */
 export function mergeCurative(specific: CuratorItemExtract[], other: CuratorItemExtract[]): CuratorItemExtract[] {
   const a = (specific || []).filter((i) => SPECIFIC_SECTIONS.has(normSection(i.section)));
-  const b = (other || []).filter((i) => !SPECIFIC_SECTIONS.has(normSection(i.section)));
+  // the "other" pass sometimes repeats specific items under a general/non-action heading when the opinion has none
+  const specKeys = a.map((i) => dedupeKey(i.defect)).filter((k) => k.length > 20);
+  const copiesSpecific = (d: string) => {
+    const k = dedupeKey(d);
+    if (k.length <= 20) return false;
+    const head = k.slice(0, 80);
+    return specKeys.some((sk) => sk === k || sk.includes(head) || k.includes(sk.slice(0, 80)));
+  };
+  const b = (other || []).filter((i) => !SPECIFIC_SECTIONS.has(normSection(i.section)) && !copiesSpecific(i.defect));
   const seen = new Set<string>();
   const out: CuratorItemExtract[] = [];
   for (const it of [...a, ...b]) {
@@ -308,7 +332,8 @@ export interface AssembleInput {
   miscNotes?: string;
   ownership: OwnershipExtract;
   leases: LeaseInfo[];
-  wells?: string[][];                                  // from the wells pass
+  wells?: string[][];                                  // from the wells passes (opinions + abstract)
+  chain?: { amendments: string[][]; assignments: string[][]; orri: string[][] } | null; // leasehold chain pass
   tmcAcreage?: { total: string; parts: string[] } | null; // parsed from the TMC page 1
 }
 
@@ -357,7 +382,8 @@ export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
   const titleQls = core.qls || '';
   const multi = parcels.length > 1;
   const tractNos = splitTracts(form.tractNumbers);
-  const bdDate = core.bringdown?.date || '';
+  const lastBd = core.bringdowns && core.bringdowns.length ? core.bringdowns[core.bringdowns.length - 1] : core.bringdown;
+  const bdDate = lastBd?.date || '';
   const certDate = bdDate || core.cert_end || '';
 
   // ---------- CAR owner tables ----------
@@ -367,15 +393,15 @@ export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
       const lease = o.lease_index !== null && o.lease_index !== undefined ? leases[o.lease_index] : undefined;
       if (!lease) {
         return {
-          owner: o.owner_name, execRights: decimalString(o.exec_fraction), royaltyOwnership: decimalString(o.royalty_fraction),
+          owner: o.owner_name, execRights: fractionAndDecimal(o.exec_fraction), royaltyOwnership: fractionAndDecimal(o.royalty_fraction),
           controlType: 'Open', agreementQls: 'Open', recording: 'Open', royalty: 'Open', poolingLimit: 'Open',
           pugh: 'Open', expiration: 'Open', heldBy: 'Open', formations: 'Open',
         };
       }
       return {
         owner: o.owner_name,
-        execRights: decimalString(o.exec_fraction),
-        royaltyOwnership: decimalString(o.royalty_fraction),
+        execRights: fractionAndDecimal(o.exec_fraction),
+        royaltyOwnership: fractionAndDecimal(o.royalty_fraction),
         controlType: 'Lease',
         agreementQls: leaseQls(titleQls, o.qls_agreement, lease.agreement_number, lease.agreement_number_alt),
         recording: (lease.recording || '').replace(/^\s*(instr(ument)?\.?\s*(no\.?|number)?\s*#?\s*)/i, ''),
@@ -405,13 +431,15 @@ export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
     certRange: o.cert_start || o.cert_end ? `${o.cert_start} to ${o.cert_end}` : '',
     opinionDate: o.opinion_date || '',
   }));
-  if (core.bringdown && (core.bringdown.date || core.bringdown.cert_end)) {
+  const bds = (core.bringdowns && core.bringdowns.length ? core.bringdowns : core.bringdown ? [core.bringdown] : [])
+    .filter((b) => b && (b.date || b.cert_end));
+  bds.forEach((b, i) => {
     opinions.push({
       lawFirm: 'Internal Bringdown',
-      certRange: `${core.bringdown.cert_start || core.cert_end} to ${core.bringdown.cert_end || core.bringdown.date}`,
-      opinionDate: core.bringdown.date || core.bringdown.cert_end,
+      certRange: `${b.cert_start || (i > 0 ? bds[i - 1].cert_end || bds[i - 1].date : core.cert_end)} to ${b.cert_end || b.date}`,
+      opinionDate: b.date || b.cert_end,
     });
-  }
+  });
 
   const car: CarData = {
     qls: core.qls || '',
@@ -428,11 +456,11 @@ export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
       divisionOrder: numbered(dor),
     },
     tractDescription: core.tract_description || '',
-    wiTables: wiFromLeases(core.wi_tables, ownership, leases),
+    wiTables: mergeWiOwners(wiFromLeases(core.wi_tables, ownership, leases)),
     parcels: carParcels,
-    amendments: toRows(core.amendments),
-    assignments: toRows(core.assignments),
-    orri: toRows(core.orri),
+    amendments: toRows(input.chain?.amendments?.length ? input.chain.amendments : core.amendments),
+    assignments: toRows(input.chain?.assignments?.length ? input.chain.assignments : core.assignments),
+    orri: toRows(input.chain?.orri?.length ? input.chain.orri : core.orri),
     units: toRows(core.units),
     wellDateChecked: core.well_date_checked || form.reviewDate || '',
     leaseWideGaps: core.lease_wide_gaps || 'N/A',
@@ -597,6 +625,12 @@ export function decimalToFraction(v: string): string {
   return s;
 }
 
+/** CAR ownership cell "1/2\n0.5" → "1/2" ("1/1" → "1"). */
+function firstFraction(v: string): string {
+  const f = decimalToFraction((v || '').split('\n')[0].trim());
+  return f === '1/1' ? '1' : f;
+}
+
 function acresNumber(s: string): string {
   const m = (s || '').replace(/,/g, '').match(/\d*\.?\d+/);
   return m ? m[0] : '';
@@ -639,7 +673,7 @@ export function ownershipFromCar(car: CarData): { ownership: OwnershipExtract; c
       }
       owners.push({
         parcel_index: pi, tmp: parcels[pi]?.tmp || '', owner_name: o.owner, address: '',
-        exec_fraction: decimalToFraction(o.execRights), royalty_fraction: decimalToFraction(o.royaltyOwnership),
+        exec_fraction: firstFraction(o.execRights), royalty_fraction: firstFraction(o.royaltyOwnership),
         vesting: '', lease_index: leaseIndex, lease_status: isOpen(o.heldBy) ? (leaseIndex === null ? 'Open' : 'Primary Term') : o.heldBy,
         qls_agreement: isOpen(o.agreementQls) ? '' : o.agreementQls, notes: '',
       });
@@ -759,6 +793,34 @@ export function padFromCar(
       titleNotes: ownership.title_notes || '',
     }),
   };
+}
+
+const ownerKey = (o: string) => (o || '').toLowerCase().replace(/\b(llc|l\.l\.c|inc|co|company|corp|corporation|lp|ltd)\b/g, '').replace(/[^a-z0-9]+/g, '');
+
+/** One WI row per owner per formation: the same owner under several leases is added up (WI and NRI summed). */
+export function mergeWiOwners(tables: CarData['wiTables']): CarData['wiTables'] {
+  return (tables || []).map((t) => {
+    const out: CarData['wiTables'][number]['rows'] = [];
+    const by = new Map<string, { row: CarData['wiTables'][number]['rows'][number]; wi: number | null; nri: number | null }>();
+    for (const r of t.rows || []) {
+      const k = ownerKey(r.owner);
+      const prev = k && !/^open$/i.test(r.owner.trim()) ? by.get(k) : undefined;
+      const wi = fractionToDecimal(r.wi);
+      const nri = fractionToDecimal(r.nri);
+      if (!prev) {
+        const row = { ...r };
+        out.push(row);
+        if (k) by.set(k, { row, wi, nri });
+        continue;
+      }
+      prev.wi = prev.wi !== null && wi !== null ? prev.wi + wi : null;
+      prev.nri = prev.nri !== null && nri !== null ? prev.nri + nri : null;
+      if (prev.wi !== null) prev.row.wi = decimalString(String(parseFloat(prev.wi.toFixed(8))));
+      if (prev.nri !== null) prev.row.nri = decimalString(String(parseFloat(prev.nri.toFixed(8))));
+      if (/^y/i.test(r.orri || '')) prev.row.orri = 'Yes';
+    }
+    return { ...t, rows: out };
+  });
 }
 
 /** If every owner is leased to the same lessee but the WI table still says "Open", fill it from the lease. */

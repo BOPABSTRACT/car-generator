@@ -238,6 +238,7 @@ export interface CoreExtract {
   cert_end: string;
   opinion_date: string;
   bringdown: { cert_start: string; cert_end: string; date: string } | null;
+  bringdowns?: { cert_start: string; cert_end: string; date: string }[]; // every internal bringdown, oldest → newest
   estates: string;
   acres_title: string;
   acres_resolved: string;
@@ -261,6 +262,14 @@ export interface CoreExtract {
   heirship_name: string;
   additional_product_needed: string;
   notes_for_reviewer: string;
+}
+
+/** Leasehold chain (amendments, assignments, ORRI) — extracted in its own pass so long chains aren't cut short. */
+export interface ChainExtract {
+  amendments: Row[];
+  assignments: Row[];
+  orri: Row[];
+  notes?: string;
 }
 
 export interface FormInfo {

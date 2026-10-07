@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type {
-  CoreExtract, CurativeExtract, LeaseInfo, OwnershipExtract,
+  ChainExtract, CoreExtract, CurativeExtract, LeaseInfo, OwnershipExtract,
 } from './types';
 
 // Model can be changed in Vercel without a code change (Settings → Environment Variables → CLAUDE_MODEL).
@@ -75,7 +75,7 @@ export interface SourceTexts {
   newerOpinion?: string;        // curative on an older opinion: the newest opinion, for context only
   titleQls?: string;
   tmc?: string;
-  bringdown?: string;
+  bringdown?: string;           // every internal bringdown, oldest → newest (each wrapped in <bringdown> tags)
   abstract?: string;
   leases?: LeaseInfo[];
   reviewDate?: string;
@@ -136,6 +136,7 @@ export async function transcribePages(images: { page: number; data: string }[], 
     text: `These are scanned pages of "${filename}" (oil and gas title / lease records, often old printed forms filled in by hand or written in cursive).
 Transcribe every page completely and exactly, in reading order. Start each page with its "[Page N]" marker.
 - Keep printed form text and the handwritten/typed fill-ins together in the sentence where they belong.
+- If a page is a grid of separate records (e.g. a "Well Information" sheet with several numbered wells per row), transcribe each record as its own block, in number order, keeping each record's lines together (number, API, status, well name, operator, dates, production).
 - Write dates, names, acreage, book/page and dollar amounts exactly as written.
 - If a word or number is unclear, give your best reading followed by [?]. If it is illegible, write [illegible].
 - Do not summarize, explain or add commentary. Output only the transcription.`,
@@ -207,7 +208,7 @@ ${text}
 export async function extractCore(s: SourceTexts): Promise<CoreExtract> {
   const prompt = `Build the data for the CNX Curative Action Report (CAR) from the documents below. Analyst review date: ${s.reviewDate || 'today'}.
 
-SOURCE PRIORITY: the title opinion(s) are the primary source. When there is more than one title opinion, the NEWEST one controls current ownership, leasehold and tract data; older ones are listed in "opinions" and still count for outsales and encumbrances. Use the Title Mapping Curative (TMC) for resolved acreage, outsales and survey matters. Use the internal bringdown for anything recorded after the newest opinion's certification date (new conveyances, leases, mortgage satisfactions). Use the lease summaries for lease terms.
+SOURCE PRIORITY: the title opinion(s) are the primary source. When there is more than one title opinion, the NEWEST one controls current ownership, leasehold and tract data; older ones are listed in "opinions" and still count for outsales and encumbrances. Use the Title Mapping Curative (TMC) for resolved acreage, outsales and survey matters. Use the internal bringdown(s) for anything recorded after the newest opinion's certification date (new conveyances, leases, mortgage satisfactions). There may be more than one bringdown, oldest → newest; the newest controls. Use the lease summaries for lease terms.
 If the TMC contains more than one version (e.g. an original and a "(Revised)" TMC), use the most recent / revised version.
 
 Return ONE JSON object with these fields (strings unless noted). TABLES MUST BE ARRAYS OF ARRAYS OF STRINGS in the column order given — e.g. "liens": [["202508584\\n(5886/70)", "9/12/2025\\n9/19/2025", "...", "$113,900.00", "Yes", "..."]] — never arrays of objects. Use [] when the opinion reports none:
@@ -216,15 +217,14 @@ Return ONE JSON object with these fields (strings unless noted). TABLES MUST BE 
 - tmps: array of tax map parcel numbers WITHOUT county/district prefix, e.g. ["240.06-01-11","240.06-01-12"]
 - township, county, state (state spelled out, e.g. "Pennsylvania")
 - law_firm, cert_start, cert_end, opinion_date: for the NEWEST opinion (short firm name e.g. "Bowles Rice"; certification/search period from "Materials Examined" or the certification, M/D/YYYY; date of the opinion letter)
-- bringdown: {"cert_start","cert_end","date"} from the internal bringdown (period searched; date = end of period) or null if no bringdown provided
+- bringdowns: EVERY internal bringdown provided, oldest → newest: [{"cert_start","cert_end","date"}] (period searched; date = end of period); [] if no bringdown provided
+- bringdown: the newest entry of "bringdowns", or null
 - estates: estates certified, sentence case, e.g. "Surface, oil and gas" or "Oil and gas only"
 - acres_title: total acreage covered by the opinion, e.g. "1.167 acres"
 - acres_resolved: FINAL resolved acreage total from the TMC — the "Resolved Mapping Acreage" line near the top of page 1, the number after "=" when parts are added (e.g. "1.34 acres"); "" if no TMC
 - tract_description: "<tax parcels comma separated>, containing <acres_title>"
-- wi_tables: array of {"formation","rows":[{"owner","wi","nri","orri"}]} — Working Interest Ownership by formation. A lease shown in the internal bringdown or the lease summaries (recorded after the opinion) counts — the tract is then leased to that lessee. NRI = WI × (1 − royalty) − any ORRI, as a decimal (e.g. 15% royalty → "0.85"). If UNLEASED use [{"formation":"All formations","rows":[{"owner":"Open","wi":"1.0","nri":"Open","orri":"Open"}]}]. Otherwise owner = current working-interest owner (lessee/assignee), wi and nri as decimals, orri "Yes"/"No".
-- amendments: [Lessor/Grantor, Lessee/Grantee, Date of Instr., Recording, Date Recorded, Term, Explanation of Modified Terms]
-- assignments: [Assignor, Assignee, Date of Instr., Recording, Date Recorded, Term, Formations Assigned, ORRI Reserved, Pugh, Other Restrictions]
-- orri: [Current Owner, ORRI, Formations Subject to ORRI, Instrument Creating ORRI, Instrument Vesting ORRI]
+- wi_tables: array of {"formation","rows":[{"owner","wi","nri","orri"}]} — Working Interest Ownership by formation. ONE row per working-interest owner per formation: if the same owner holds the tract under several leases, give that owner's TOTAL wi and TOTAL nri for the tract in one row (never one row per lease). A lease shown in the internal bringdown or the lease summaries (recorded after the opinion) counts — the tract is then leased to that lessee. NRI = WI × (1 − royalty) − any ORRI, as a decimal (e.g. 15% royalty → "0.85"). If UNLEASED use [{"formation":"All formations","rows":[{"owner":"Open","wi":"1.0","nri":"Open","orri":"Open"}]}]. Otherwise owner = current working-interest owner (lessee/assignee), wi and nri as decimals, orri "Yes"/"No".
+- amendments, assignments, orri: [] (the leasehold chain is handled by a separate pass)
 - units: existing units/pools [Book/Page, Date Formed, Declarant, Unit Name, Acreage Contributed, Total Acreage, Depths Unitized]
 - wells: [] (wells are handled by a separate pass)
 - well_date_checked: the analyst review date
@@ -251,11 +251,16 @@ ${allSources(s, false, true)}`;
 // ---------------------------------------------------------------------------
 const CURATIVE_RULES = `For each item return:
 - section: "SPECIFIC CURATIVE ACTION ITEMS" | "GENERAL CURATIVE ACTION ITEMS" | "NON-ACTION CURATIVE ITEMS" | "COMMENTS AND LIMITATIONS" | "INTERNAL BRINGDOWN ITEMS" (map the law firm's own headings — e.g. "Requirements", "Title Requirements", "Advisory Comments" — onto the closest of these)
-- defect: the item VERBATIM from the opinion, starting with its label exactly as the opinion prints it (e.g. "Specific Curative Action Item 1:" or "1." — never invent a label) followed by "\\n", then the body, then "\\nRecommendations:\\n" and the recommendation text if the opinion has one. Keep paragraph breaks as "\\n". Remove page headers/footers that interrupt the text (letter addressee, date and "Page N" lines) and footnote markers. Do not summarize.
+- defect: the WHOLE item VERBATIM from the opinion — the description of the defect AND the requirement/recommendation, never just the requirement — starting with its label exactly as the opinion prints it (e.g. "Specific Curative Action Item 1:" or "1." — never invent a label) followed by "\\n", then the body, then "\\nRecommendations:\\n" and the recommendation text if the opinion has one. Keep paragraph breaks as "\\n". Remove page headers/footers that interrupt the text (letter addressee, date and "Page N" lines) and footnote markers. Do not summarize.
 - recommendation: the CNX Recommendation/Status, written the way a CNX title analyst would (see conventions)
 - status: "open" (work remains), "satisfied", "advisory" or "waived"
 - team: who must act on an OPEN item — "land" (leasing, subordinations, releases, well checks, heirship/affidavits), "mapping" (survey / Title Mapping Curative), "title" (attorney/title professional review, supplemental opinion, quiet title), "division_order" (pay/suspense/ownership-for-payment issues), "third_party" (outside operators/lessees), or "none" when not open
 - action: for OPEN items, one concise sentence for the Curative Summary and Pad Summary (e.g. "Obtain a subordination from First Commonwealth Bank for the mortgage recorded at 5886/70."); "" otherwise
+
+LAW FIRM FORMATS: firms lay out their opinions differently. Read the WHOLE opinion before listing items.
+- Some firms number requirements with Roman numerals or letters (e.g. Kostrub: "I.", "II.", "A.", "B.") and put the description of the problem and the requirement in separate paragraphs or sub-parts ("Comment:", "Requirement:", "Discussion:"). The defect must contain ALL of those parts for the item, not only the requirement.
+- Some older opinions (e.g. Steptoe & Johnson) list the requirements near the BEGINNING of the opinion and the non-action / advisory comments near the END — look in both places.
+- Requirements may be headed "Requirements", "Title Requirements", "Curative Requirements", "Action Items", "Exceptions"; advisory items "Comments", "Advisory Comments", "Notes", "Non-Action Items".
 
 CNX ANALYST CONVENTIONS (follow these closely):
 - Survey / vague description / plats do not close: if a TMC is provided that resolves the tract → recommendation "Satisfied by Title Mapping Curative", status satisfied. If no TMC → "Obtain Title Mapping Curative.", status open, team mapping.
@@ -276,7 +281,7 @@ CNX ANALYST CONVENTIONS (follow these closely):
 export async function extractCurative(s: SourceTexts, part: 'specific' | 'other'): Promise<CurativeExtract> {
   const scope = part === 'specific'
     ? 'Return ONLY the SPECIFIC curative action items / title requirements (the tract-specific requirements), plus any INTERNAL BRINGDOWN ITEMS. Do NOT include general items, non-action items or comments/limitations — another pass handles those. Each opinion item appears exactly once.'
-    : 'Return ONLY the GENERAL curative action items, the NON-ACTION curative items, and the COMMENTS AND LIMITATIONS. Do NOT include specific items. Each opinion item appears exactly once — never repeat an item. Set "misc_notes" to "None" (the Miscellaneous section is handled by another pass).';
+    : 'Return ONLY the GENERAL curative action items, the NON-ACTION curative items, and the COMMENTS AND LIMITATIONS — and only items the opinion itself prints under such a heading. Do NOT include specific / tract requirements, even rephrased, and never copy a specific item into these sections. If the opinion has no general or non-action section, return no items for it (an empty list is correct). Each opinion item appears exactly once — never repeat an item. Set "misc_notes" to "None" (the Miscellaneous section is handled by another pass).';
   const context = s.newerOpinion
     ? '\nNOTE: a NEWER title opinion is included only as context (<newer_title_opinion_for_context_only>). List items ONLY from <title_opinion>; you may use the newer opinion when writing the recommendation (e.g. an item cured or superseded by the newer opinion).\n'
     : '';
@@ -300,7 +305,7 @@ export async function extractOwnership(s: SourceTexts): Promise<OwnershipExtract
 
 Rules:
 - Use ONLY the newest title opinion's current oil and gas ownership tables / certification (older opinions are not provided here).
-- CHANGES AFTER THE OPINION: if the internal bringdown shows a deed, estate, or other instrument recorded after the certification date that changes vesting (e.g. a deed from the owner to someone else, a deed adding a spouse, a death/estate), UPDATE the owners to the new current owners and interests. Put a note on each changed owner (e.g. "Vesting updated per bringdown: Deed dated 7/1/2026, recorded 7/8/2026, Instr. #202605555, from X to Y") and summarise all such changes in "bringdown_changes" ("" if none). If the bringdown instrument is unclear, keep the opinion's owners and describe the possible change in bringdown_changes instead.
+- CHANGES AFTER THE OPINION: if any internal bringdown (there may be several, oldest → newest — apply them in order) shows a deed, estate, or other instrument recorded after the certification date that changes vesting (e.g. a deed from the owner to someone else, a deed adding a spouse, a death/estate), UPDATE the owners to the new current owners and interests. Put a note on each changed owner (e.g. "Vesting updated per bringdown: Deed dated 7/1/2026, recorded 7/8/2026, Instr. #202605555, from X to Y") and summarise all such changes in "bringdown_changes" ("" if none). If the bringdown instrument is unclear, keep the opinion's owners and describe the possible change in bringdown_changes instead.
 - Create separate parcels ONLY when ownership differs between tax parcels (e.g. the opinion lists different owners or interests "As to Parcel One / Parcel Two"). If every tax parcel has the same owners and interests, return ONE parcel whose tmp lists all tax parcels comma-separated (e.g. "240.05-01-01, 240.05-01-03, 240.06-01-18") and whose acres are the totals.
 - One owner entry per owner per parcel. Keep the owner's name as written in the opinion and add the tenancy where stated (", JTWROS" for "with rights of survivorship", "husband and wife, as tenants by the entireties" → ", TBE").
 - exec_fraction = leasing / executive rights fraction; royalty_fraction = oil and gas royalty (mineral) fraction. Keep exact fractions as written (e.g. "1/2", "1/22", "1"). Never round.
@@ -322,30 +327,60 @@ ${allSources(s, false)}`;
 }
 
 // ---------------------------------------------------------------------------
-// 5. WELLS — every well in the title opinion(s) and the abstract, merged
+// 5. WELLS — one pass over the title opinion(s), one over the abstract; merged by API number afterwards
 // ---------------------------------------------------------------------------
-export async function extractWells(s: SourceTexts): Promise<{ wells: string[][]; notes: string }> {
-  const prompt = `Build the "Well History" table of the CNX Curative Action Report. Analyst review date: ${s.reviewDate || 'today'}.
-
-Include EVERY well listed in ANY title opinion (e.g. "Relevant Well Ownership", well tables, wells mentioned in lease/HBP discussion) AND every well in the abstract's well information / well research for the subject tract (well detail tables, completion reports, production reports, plugging certificates). Do not stop early — if the opinion lists 5 wells, all 5 must appear. If the same well (same API number) appears in more than one source, list it ONCE and combine the information.
-
-Columns (array of arrays of strings, in this order):
+const WELL_COLUMNS = `Columns (array of arrays of strings, in this order):
 1. Well API# — as written, e.g. "37-005-20051" or "005-20051"
-2. Associated Lease — the lease the well was drilled under / holds (lessor → lessee, book/page or QLS if known), or the farm/well name if no lease is identified
-3. Associated Lease Acreage
-4. Associated Unit — unit name / declaration if any, else "N/A"
-5. Well Completion Date — completion (or spud/permit date if that's all that's given, labelled e.g. "Spud 5/1/1956")
-6. Well Status — Active, P&A (Plugged and Abandoned), Dry Hole, Inactive, Temporarily Not Producing, etc. — as reported
-7. Gaps in Production / Production Notes — operator, well type (gas/oil/conventional/unconventional), last reported production year, years with no production reported, plugging date, and anything else relevant from the abstract
+2. Associated Lease — the lease the well was drilled under / holds (lessor → lessee, book/page or QLS if known); "Unknown" if not identified
+3. Associated Lease Acreage — "Unknown" if not identified
+4. Associated Unit — unit name / declaration if any; otherwise the well / farm name (e.g. "S H Bollinger 003")
+5. Well Completion Date — completion date (or the permit/spud date if that's all that's given, labelled e.g. "Permit 7/18/1994")
+6. Well Status — as reported: Active, Plugged, P&A, Expired/Not Drilled, Dry Hole, Inactive, etc.
+7. Gaps in Production / Production Notes — operator, last reported production (e.g. "Production last reported 2021 - 1332 MCF" or "No production reported"), plugging date, gaps, and "(Holds subject parcel HBP)" or "(Does not pertain to the subject parcel.)" when the source says so`;
 
-Return JSON: {"wells": [[...7 strings...], ...], "notes": "anything the analyst should check, e.g. wells in the abstract that may not be on the subject tract"}.
-Return {"wells": [], "notes": ""} if no wells are reported anywhere.
+export async function extractWells(s: SourceTexts, scope: 'opinions' | 'abstract' = 'opinions'): Promise<{ wells: string[][]; notes: string }> {
+  const fromOpinion = scope === 'opinions';
+  if (!fromOpinion && !(s.abstract || '').trim()) return { wells: [], notes: '' };
+  const what = fromOpinion
+    ? `List EVERY well mentioned in the title opinion(s) — "Relevant Well Ownership" sections, well tables, wells named in assignments, lease or HBP discussion. Do not stop early — if the opinion lists 5 wells, all 5 must appear. If several opinions list the same well (same API number), list it once.`
+    : `List EVERY well in the abstract's well section — the "Well Information" / "Well Info" sheet, well research, well detail tables, completion/production/plugging records. Include ALL of them, including wells that are only near the subject tract, expired/not-drilled permits and plugged wells — the CNX analyst lists every well the abstract reports (add "(Does not pertain to the subject parcel.)" in column 7 only if the abstract says so). Some abstracts (e.g. Daxton Irving) print the well information as a GRID with several numbered wells side by side (each well = number, API, status, well name, operator, completion/permit date, last production); read it well by well and do not mix up the columns. Count the wells in the source and make sure every one is in your list.`;
+  const prompt = `Build rows for the "Well History" table of the CNX Curative Action Report. Analyst review date: ${s.reviewDate || 'today'}.
 
-${[opinionBlocks(s, true), block('abstract_of_title_well_information', s.abstract)].join('\n\n')}`;
+${what}
+
+${WELL_COLUMNS}
+
+Return JSON: {"wells": [[...7 strings...], ...], "notes": "anything the analyst should check"}.
+Return {"wells": [], "notes": ""} if no wells are reported.
+
+${fromOpinion ? opinionBlocks(s, true) : block('abstract_of_title_excerpts', s.abstract)}`;
   const out = await runJson<{ wells: unknown; notes?: string }>(prompt, 16000);
   const rows = Array.isArray(out.wells) ? out.wells : [];
   return {
     wells: rows.map((r) => (Array.isArray(r) ? r.map((x) => String(x ?? '')) : Object.values(r as Record<string, unknown>).map((x) => String(x ?? '')))),
     notes: out.notes || '',
   };
+}
+
+// ---------------------------------------------------------------------------
+// 6. LEASEHOLD CHAIN — amendments, every assignment, ORRI
+// ---------------------------------------------------------------------------
+export async function extractChain(s: SourceTexts): Promise<ChainExtract> {
+  const prompt = `Build the "Leasehold Amendments/Ratifications, Assignment Chain & ORRI" tables of the CNX Curative Action Report from the title opinion(s) (the opinion's leasehold / lease chain section, e.g. "SUBJECT LEASE", "LEASEHOLD", "CURRENT OIL AND GAS LEASE"), plus anything recorded later in the internal bringdown(s).
+
+Be EXHAUSTIVE: include EVERY instrument the opinion lists in the chain of the subject lease, in the order the opinion lists them (usually a., b., c., ...), all the way to the end of the chain. That includes assignments the opinion says were "given no effect", confirmatory assignments, assignments of wells only, partial/depth assignments, mergers, name changes and corrections. Count the lettered/numbered instruments in the opinion and make sure every one is in your output. Do NOT include prior (expired/released) leases or their assignments — only the current subject lease(s).
+
+TABLES ARE ARRAYS OF ARRAYS OF STRINGS (never objects); [] if none:
+- amendments: amendments, modifications, ratifications, extensions, corrections of the subject lease [Lessor/Grantor, Lessee/Grantee, Date of Instr., Recording, Date Recorded, Term, Explanation of Modified Terms]
+- assignments: [Assignor, Assignee, Date of Instr., Recording (e.g. "DB 2501/480" or "Instr. #202605555"), Date Recorded, Term ("N/A" if none), Formations Assigned (e.g. "All", "Depths below 100 feet below the base of the Elk", "Wells only"), ORRI Reserved (Yes/No), Pugh (Yes/No), Other Restrictions (anything notable — e.g. "Given no effect per opinion: assignor had no remaining interest")]
+  Use the assignor/assignee names as the opinion prints them; shorten long multi-party lists to the first party + "et al".
+- orri: [Current Owner, ORRI, Formations Subject to ORRI, Instrument Creating ORRI, Instrument Vesting ORRI]
+- notes: anything the analyst should double-check ("" if none)
+
+Return JSON: {"amendments":[], "assignments":[], "orri":[], "notes":""}
+
+${[opinionBlocks(s, true), block('internal_bringdown', s.bringdown)].join('\n\n')}`;
+  const out = await runJson<ChainExtract>(prompt, 16000);
+  const rowsOf = (v: unknown): string[][] => (Array.isArray(v) ? v : []).map((r) => (Array.isArray(r) ? r.map((x) => String(x ?? '')) : Object.values(r as Record<string, unknown>).map((x) => String(x ?? ''))));
+  return { amendments: rowsOf(out.amendments), assignments: rowsOf(out.assignments), orri: rowsOf(out.orri), notes: out.notes || '' };
 }

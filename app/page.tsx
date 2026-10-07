@@ -4,12 +4,13 @@ import { useState } from 'react';
 import { pdfPages, pdfPageImages } from '@/lib/pdf-text';
 import {
   stripRunningHeaders, joinPages, abstractExcerpt, pagesNeedingVision, tmcResolvedAcreage, opinionDateFromText,
+  wellSectionScannedPages,
 } from '@/lib/text-clean';
 import type { OpinionText } from '@/lib/claude';
 import { assemble, mergeCurative, normalizeCar, padFromCar } from '@/lib/assemble';
 import { OWNERSHIP_COLUMNS, TITLE_CURATIVE_COLUMNS } from '@/lib/pad-columns';
 import type {
-  CarData, PadData, FormInfo, LeaseInfo, CoreExtract, CurativeExtract, OwnershipExtract,
+  CarData, PadData, FormInfo, LeaseInfo, CoreExtract, CurativeExtract, OwnershipExtract, ChainExtract,
   CarOwnerRow, WiRow, PadOwnershipRow, CuratorItemExtract,
 } from '@/lib/types';
 import { Field, Section, RowsTable, ObjTable, StepList, type Step, type StepStatus } from './ui';
@@ -72,7 +73,7 @@ export default function Home() {
   const [carDocFile, setCarDocFile] = useState<File | null>(null);
   const [opinionFiles, setOpinionFiles] = useState<File[]>([]);
   const [tmcFile, setTmcFile] = useState<File | null>(null);
-  const [bringdownFile, setBringdownFile] = useState<File | null>(null);
+  const [bringdownFiles, setBringdownFiles] = useState<File[]>([]);
   const [abstractFile, setAbstractFile] = useState<File | null>(null);
   const [leaseFiles, setLeaseFiles] = useState<File[]>([]);
 
@@ -112,14 +113,14 @@ export default function Home() {
   }
 
   /** Reads scanned / handwritten pages with Claude (page images rendered in the browser, sent a few at a time). */
-  async function readPagesWithVision(file: File, pageIdx: number[], id: string): Promise<Map<number, string>> {
+  async function readPagesWithVision(file: File, pageIdx: number[], id: string, opts: { batch?: number; maxSide?: number } = {}): Promise<Map<number, string>> {
     const out = new Map<number, string>();
-    const BATCH = 4;
+    const BATCH = opts.batch || 4;
     const batches: number[][] = [];
     for (let i = 0; i < pageIdx.length; i += BATCH) batches.push(pageIdx.slice(i, i + BATCH));
     let done = 0;
     const worker = async (batch: number[]) => {
-      const images = await pdfPageImages(file, batch);
+      const images = await pdfPageImages(file, batch, opts.maxSide ? { maxSide: opts.maxSide, quality: 0.8 } : undefined);
       const { text } = await postJson<{ text: string }>('/api/vision', { filename: file.name, images });
       // split "[Page N]" markers back out
       const parts = text.split(/\[Page (\d+)\]/);
@@ -141,8 +142,19 @@ export default function Home() {
     stepSet(id, 'running', 'reading text…');
     const pages = await pdfPages(file, (d, t) => stepSet(id, 'running', `page ${d} of ${t}`));
     if (mode === 'abstract') {
-      const text = abstractExcerpt(stripRunningHeaders(pages));
-      stepSet(id, 'done', text ? `${pages.length} pages, ${Math.round(text.length / 1000)}k chars used` : 'scanned — skipped (abstract is optional)');
+      // a well section that is only a scanned image (e.g. Daxton Irving "Well Information") is read from the page image
+      const wellPages = wellSectionScannedPages(pages);
+      if (wellPages.length) {
+        stepSet(id, 'running', `reading ${wellPages.length} scanned well page(s) with AI…`);
+        try {
+          const read = await readPagesWithVision(file, wellPages, id, { batch: 2, maxSide: 2400 });
+          read.forEach((t, i) => { pages[i] = t; });
+        } catch { /* well pages are optional */ }
+      }
+      const text = abstractExcerpt(stripRunningHeaders(pages), 150000, wellPages);
+      stepSet(id, 'done', text
+        ? `${pages.length} pages, ${Math.round(text.length / 1000)}k chars used${wellPages.length ? ` (${wellPages.length} well page(s) read from images)` : ''}`
+        : 'scanned — skipped (abstract is optional)');
       return text;
     }
     // leases: read images unless there's plenty of good text; other documents: only when essentially no text layer
@@ -162,16 +174,39 @@ export default function Home() {
     return text;
   }
 
-  async function readBringdown(file: File): Promise<string> {
-    if (/\.pdf$/i.test(file.name)) return readPdf(file, 'bringdown', 'full');
-    stepSet('bringdown', 'running', 'reading Word file…');
+  async function readBringdown(file: File, id: string): Promise<string> {
+    if (/\.pdf$/i.test(file.name)) return readPdf(file, id, 'full');
+    stepSet(id, 'running', 'reading Word file…');
     const fd = new FormData();
     fd.append('file', file);
     const res = await fetch('/api/doc-text', { method: 'POST', body: fd });
     const data = await res.json();
     if (!res.ok || data.error) throw new Error(data.error || 'Could not read bringdown');
-    stepSet('bringdown', 'done', `${Math.round((data.text || '').length / 1000)}k chars`);
+    stepSet(id, 'done', `${Math.round((data.text || '').length / 1000)}k chars`);
     return data.text as string;
+  }
+
+  /** Reads every bringdown, orders them oldest → newest (date in the file name, else the first date in the text). */
+  async function readBringdowns(files: File[]): Promise<{ text: string; order: string[] }> {
+    const read = await Promise.all(files.map(async (file, i) => {
+      const id = `bringdown-${i}`;
+      try {
+        const text = await readBringdown(file, id);
+        const m = file.name.match(/(\d{1,2})[.\-_](\d{1,2})[.\-_](\d{4})/);
+        const fromName = m ? { mdy: `${+m[1]}/${+m[2]}/${m[3]}`, time: Date.UTC(+m[3], +m[1] - 1, +m[2]) } : null;
+        const d = fromName || opinionDateFromText(text);
+        if (d) stepSet(id, 'done', `dated ${d.mdy}`);
+        return { label: file.name, date: d?.mdy || '', time: d?.time ?? i, text };
+      } catch (e) {
+        stepSet(id, 'error', e instanceof Error ? e.message : String(e));
+        return null;
+      }
+    }));
+    const ok = read.filter(Boolean) as { label: string; date: string; time: number; text: string }[];
+    ok.sort((a, b) => a.time - b.time);
+    const order = ok.map((b) => `${b.date || '?'} (${b.label})`);
+    if (ok.length <= 1) return { text: ok[0]?.text || '', order };
+    return { order, text: ok.map((b, i) => `<bringdown number="${i + 1} of ${ok.length}" file="${b.label}" date="${b.date || 'unknown'}"${i === ok.length - 1 ? ' newest="true"' : ''}>\n${b.text.trim()}\n</bringdown>`).join('\n\n') };
   }
 
   /** Reads every title opinion and orders them oldest → newest by the letter date on page 1. */
@@ -211,11 +246,15 @@ export default function Home() {
     const initial: Step[] = [
       ...opinionFiles.map((of, i) => ({ id: `opinion-${i}`, label: `Title Opinion — ${of.name}`, status: 'pending' as StepStatus })),
       { id: 'tmc', label: tmcFile ? `Title Mapping Curative — ${tmcFile.name}` : 'Title Mapping Curative (not provided)', status: tmcFile ? 'pending' : 'skipped' },
-      { id: 'bringdown', label: bringdownFile ? `Bringdown — ${bringdownFile.name}` : 'Bringdown (not provided)', status: bringdownFile ? 'pending' : 'skipped' },
+      ...(bringdownFiles.length
+        ? bringdownFiles.map((bf, i) => ({ id: `bringdown-${i}`, label: `Bringdown — ${bf.name}`, status: 'pending' as StepStatus }))
+        : [{ id: 'bringdown-none', label: 'Bringdown (not provided)', status: 'skipped' as StepStatus }]),
       { id: 'abstract', label: abstractFile ? `Abstract — ${abstractFile.name}` : 'Abstract (not provided)', status: abstractFile ? 'pending' : 'skipped' },
       ...leaseFiles.map((lf, i) => ({ id: `lease-${i}`, label: `Lease — ${lf.name}`, status: 'pending' as StepStatus })),
       { id: 'core', label: 'Header, leasehold, outsales, encumbrances', status: 'pending' },
-      { id: 'wells', label: 'Wells (title opinion + abstract)', status: 'pending' },
+      { id: 'chain', label: 'Leasehold chain — amendments, assignments, ORRI', status: 'pending' },
+      { id: 'wells', label: 'Wells — title opinion(s)', status: 'pending' },
+      { id: 'wells-ab', label: 'Wells — abstract', status: abstractFile ? 'pending' : 'skipped' },
       ...opinionFiles.flatMap((_, i) => [
         { id: `cur1-${i}`, label: `Specific curative items — opinion ${i + 1}`, status: 'pending' as StepStatus },
         { id: `cur2-${i}`, label: `General / non-action items, comments & limitations — opinion ${i + 1}`, status: 'pending' as StepStatus },
@@ -231,13 +270,14 @@ export default function Home() {
 
     try {
       // 1. text — runs in the browser; scanned/handwritten pages are read from images by Claude
-      const [opinions, tmc, bringdown, abstract] = await Promise.all([
+      const [opinions, tmc, bdRead, abstract] = await Promise.all([
         readOpinions(opinionFiles),
         tmcFile ? readPdf(tmcFile, 'tmc', 'full').catch((e) => { stepSet('tmc', 'error', e.message); return ''; }) : Promise.resolve(''),
-        bringdownFile ? readBringdown(bringdownFile).catch((e) => { stepSet('bringdown', 'error', e.message); return ''; }) : Promise.resolve(''),
+        bringdownFiles.length ? readBringdowns(bringdownFiles) : Promise.resolve({ text: '', order: [] as string[] }),
         abstractFile ? readPdf(abstractFile, 'abstract', 'abstract').catch((e) => { stepSet('abstract', 'error', e.message); return ''; }) : Promise.resolve(''),
       ]);
       const newest = opinions[opinions.length - 1];
+      const bringdown = bdRead.text;
       const tmcAcreage = tmcResolvedAcreage(tmc);
       if (tmcFile) stepSet('tmc', 'done', tmcAcreage ? `resolved acreage ${tmcAcreage.total}` : 'resolved acreage line not found — check the CAR');
 
@@ -261,6 +301,10 @@ export default function Home() {
       };
       const coreP = run<CoreExtract>('core', 'core', { ...base, opinion: newest.text });
       const wellsP = run<{ wells: string[][]; notes: string }>('wells', 'wells', { ...base, opinion: newest.text });
+      const wellsAbP = abstract
+        ? run<{ wells: string[][]; notes: string }>('wells-ab', 'wells-abstract', { ...base, opinions: undefined, opinion: '', tmc: '', bringdown: '', leases: [] })
+        : (stepSet('wells-ab', 'skipped', abstractFile ? 'no usable abstract text' : ''), Promise.resolve({ wells: [], notes: '' }));
+      const chainP = run<ChainExtract>('chain', 'chain', { ...base, opinion: newest.text, tmc: '', abstract: '', leases: [] });
       const curP = opinions.map((op, i) => {
         const src = { ...base, opinions: undefined, opinion: op.text, newerOpinion: i < opinions.length - 1 ? newest.text : undefined };
         return Promise.allSettled([
@@ -270,10 +314,12 @@ export default function Home() {
       });
       const titleQls = (newest.text.slice(0, 6000).match(/\b(\d{6}-\d{3})\b/) || opinionFiles[0].name.match(/(\d{6}-\d{3})/) || ['', ''])[1];
       const ownP = run<OwnershipExtract>('own', 'ownership', { ...base, opinions: undefined, opinion: newest.text, titleQls });
-      const [coreR, wellsR, ownR, ...curR] = await Promise.allSettled([coreP, wellsP, ownP, ...curP]);
+      const [coreR, wellsR, wellsAbR, chainR, ownR, ...curR] = await Promise.allSettled([coreP, wellsP, wellsAbP, chainP, ownP, ...curP]);
       const core = coreR.status === 'fulfilled' ? coreR.value : null;
       if (!core) throw new Error('The header/leasehold step failed — see the error above and try again.');
       const wellsOut = wellsR.status === 'fulfilled' ? wellsR.value : null;
+      const wellsAb = wellsAbR.status === 'fulfilled' ? wellsAbR.value : null;
+      const chain = chainR.status === 'fulfilled' ? chainR.value : null;
       const own = ownR.status === 'fulfilled' ? ownR.value : null;
 
       const curativeByOpinion = opinions.map((op, i) => {
@@ -291,7 +337,8 @@ export default function Home() {
         curativeByOpinion,
         ownership: own || { parcels: [], owners: [], title_notes: '' },
         leases,
-        wells: wellsOut?.wells || [],
+        wells: [...(wellsOut?.wells || []), ...(wellsAb?.wells || [])],
+        chain,
         tmcAcreage,
       });
       setCar(built.car);
@@ -300,12 +347,15 @@ export default function Home() {
         opinions.length > 1 ? `Title opinions ordered oldest → newest: ${opinions.map((o) => `${o.date || '?'} (${o.label})`).join(', ')}. Ownership uses the newest.` : '',
         own?.bringdown_changes ? `Ownership changed per bringdown: ${own.bringdown_changes}` : '',
         tmcFile && !tmcAcreage ? 'Could not find the "Resolved Mapping Acreage" line on the TMC — check FINAL Resolved Acreage.' : '',
-        wellsOut?.notes ? `Wells: ${wellsOut.notes}` : '',
+        bdRead.order.length > 1 ? `Bringdowns ordered oldest → newest: ${bdRead.order.join(', ')} — check the order on the CAR header.` : '',
+        wellsOut?.notes ? `Wells (opinion): ${wellsOut.notes}` : '',
+        wellsAb?.notes ? `Wells (abstract): ${wellsAb.notes}` : '',
+        chain?.notes ? `Assignment chain: ${chain.notes}` : '',
         core.notes_for_reviewer,
         ...leases.map((l) => (l.notes_for_reviewer ? `${l.source_file}: ${l.notes_for_reviewer}` : '')),
       ].filter((n) => n && n.trim());
       setReviewNotes(notes);
-      const failed = [wellsR, ownR].filter((x) => x.status === 'rejected').length
+      const failed = [wellsR, wellsAbR, chainR, ownR].filter((x) => x.status === 'rejected').length
         + curR.reduce((n, r) => n + (r.status === 'fulfilled' ? (r.value as PromiseSettledResult<unknown>[]).filter((x) => x.status === 'rejected').length : 2), 0);
       showStatus(failed
         ? `Done with ${failed} step(s) failing — those sections are empty. Review below, fill gaps, then export.`
@@ -560,9 +610,9 @@ export default function Home() {
           <div className="hint">{'Resolved acreage and survey/acreage clouds.'}</div>
         </div>
         <div className="form-group">
-          <label>{'Internal Bringdown (DOC, DOCX or PDF)'}</label>
-          <input type="file" accept=".doc,.docx,.pdf" onChange={(e) => setBringdownFile(e.target.files?.[0] || null)} />
-          <div className="hint">{'Bringdown row, releases and new instruments after the opinion.'}</div>
+          <label>{'Internal Bringdown(s) (DOC, DOCX or PDF)'}</label>
+          <input type="file" accept=".doc,.docx,.pdf" multiple onChange={(e) => setBringdownFiles(Array.from(e.target.files || []))} />
+          <div className="hint">{'Select all bringdowns at once — they are ordered oldest → newest by the date in the file name.'}</div>
         </div>
         <div className="form-group">
           <label>{'Abstract of Title (PDF)'}</label>

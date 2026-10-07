@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { extractCore, extractCurative, extractLease, extractOwnership, extractWells, type SourceTexts } from '@/lib/claude';
+import { extractChain, extractCore, extractCurative, extractLease, extractOwnership, extractWells, type SourceTexts } from '@/lib/claude';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
 
-// POST { task: 'lease' | 'core' | 'curative-specific' | 'curative-other' | 'ownership' | 'wells', ... }
+// POST { task: 'lease' | 'core' | 'curative-specific' | 'curative-other' | 'ownership' | 'wells' | 'wells-abstract' | 'chain', ... }
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -29,7 +29,13 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ result: await extractOwnership(sources) });
       case 'wells':
         if (!sources?.opinion) return NextResponse.json({ error: 'No title opinion text' }, { status: 400 });
-        return NextResponse.json({ result: await extractWells(sources) });
+        return NextResponse.json({ result: await extractWells(sources, 'opinions') });
+      case 'wells-abstract':
+        if (!sources) return NextResponse.json({ error: 'No sources' }, { status: 400 });
+        return NextResponse.json({ result: await extractWells(sources, 'abstract') });
+      case 'chain':
+        if (!sources?.opinion) return NextResponse.json({ error: 'No title opinion text' }, { status: 400 });
+        return NextResponse.json({ result: await extractChain(sources) });
       default:
         return NextResponse.json({ error: `Unknown task ${task}` }, { status: 400 });
     }
