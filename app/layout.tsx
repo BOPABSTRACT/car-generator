@@ -205,6 +205,7 @@ export default function RootLayout({
           .review-section > summary { cursor: pointer; padding: 12px 16px; font-weight: bold; color: #1F2937; font-size: 15px; }
           .section-note { font-weight: normal; color: #6B7280; font-size: 12px; margin-left: 10px; }
           .review-body { padding: 4px 16px 16px; }
+          .cur-block { border: 1px solid #E5E7EB; border-radius: 6px; padding: 10px 12px; margin-bottom: 14px; background: #FAFAFA; }
           .sub-block { border-top: 1px dashed #D1D5DB; padding-top: 12px; margin-top: 12px; }
           .sec-head { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
           .sec-head input { font-weight: bold; }
@@ -219,6 +220,7 @@ export default function RootLayout({
           .step-list li { display: flex; gap: 8px; padding: 3px 0; color: #1F2937; }
           .step-icon { width: 16px; text-align: center; font-weight: bold; }
           .step-detail { color: #6B7280; margin-left: auto; text-align: right; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+          .step-time { color: #9CA3AF; font-variant-numeric: tabular-nums; min-width: 52px; text-align: right; }
           .step-running .step-icon { color: #D97706; }
           .step-done .step-icon { color: #059669; }
           .step-error, .step-error .step-detail { color: #B91C1C; white-space: normal; }

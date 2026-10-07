@@ -48,6 +48,45 @@ export async function pdfPages(file: File, onPage?: (done: number, total: number
 }
 
 /**
+ * Renders the given pages (0-based) to JPEG for reading by Claude (scanned / handwritten pages).
+ * Long side is capped at `maxSide` px so a batch of pages stays under Vercel's 4.5 MB request limit.
+ */
+export async function pdfPageImages(
+  file: File,
+  pageIndexes: number[],
+  opts: { maxSide?: number; quality?: number; onPage?: (done: number, total: number) => void } = {},
+): Promise<{ page: number; data: string }[]> {
+  const lib = await loadPdfJs();
+  const maxSide = opts.maxSide ?? 1600;
+  const quality = opts.quality ?? 0.72;
+  const pdf = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()), disableFontFace: true, isEvalSupported: false }).promise;
+  const out: { page: number; data: string }[] = [];
+  let done = 0;
+  for (const idx of pageIndexes) {
+    if (idx < 0 || idx >= pdf.numPages) continue;
+    const page = await pdf.getPage(idx + 1);
+    const base = page.getViewport({ scale: 1 });
+    const scale = Math.min(3, maxSide / Math.max(base.width, base.height));
+    const vp = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(vp.width);
+    canvas.height = Math.round(vp.height);
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    const url = canvas.toDataURL('image/jpeg', quality);
+    out.push({ page: idx + 1, data: url.slice(url.indexOf(',') + 1) });
+    page.cleanup();
+    canvas.width = 0;
+    canvas.height = 0;
+    opts.onPage?.(++done, pageIndexes.length);
+  }
+  await pdf.destroy();
+  return out;
+}
+
+/**
  * Rebuild reading order line-by-line (like `pdftotext -layout`) so table rows stay on one line.
  * Items are grouped by baseline, sorted left→right, and wide gaps become runs of spaces.
  */

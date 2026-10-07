@@ -209,14 +209,15 @@
       <table>
         <thead><tr><th>Document</th><th></th><th>What it drives</th></tr></thead>
         <tbody>
-          <tr><td><strong>Title Opinion</strong> (PDF)</td><td><span class="req">Required</span></td><td>Header, ownership, leasehold, encumbrances, taxes and every curative item.</td></tr>
-          <tr><td><strong>Title Mapping Curative</strong> (PDF)</td><td></td><td>FINAL Resolved Acreage, resolved acres per parcel, and survey/acreage clouds ("Satisfied by Title Mapping Curative"). If the file contains an original and a revised TMC, the revised one is used.</td></tr>
+          <tr><td><strong>Title Opinion(s)</strong> (PDF — select several if there is more than one)</td><td><span class="req">Required</span></td><td>Header, leasehold, encumbrances, taxes, Miscellaneous section and every curative item. All opinions are listed oldest → newest in the header and each gets its own curative table; <strong>ownership comes from the newest</strong>.</td></tr>
+          <tr><td><strong>Title Mapping Curative</strong> (PDF)</td><td></td><td>FINAL Resolved Acreage (read straight from the "Resolved Mapping Acreage" line on page 1), resolved acres per parcel, outsales, and survey/acreage clouds. If the file contains an original and a revised TMC, page 1 (the revised one) is used.</td></tr>
           <tr><td><strong>Internal Bringdown</strong> (.doc, .docx or PDF)</td><td></td><td>"Internal Bringdown" row in the header, mortgage satisfactions, and any new conveyances or leases after the opinion.</td></tr>
-          <tr><td><strong>Abstract of Title</strong> (PDF)</td><td></td><td>Well information when the opinion doesn't have it. Only the cover pages and pages that mention wells are used.</td></tr>
+          <tr><td><strong>Abstract of Title</strong> (PDF)</td><td></td><td>Wells — combined with the wells in the title opinion(s), duplicates (same API #) merged. Only the cover pages and well pages are used.</td></tr>
           <tr><td><strong>Long Form Lease(s)</strong> (PDF)</td><td></td><td>Agreement terms in the CAR ownership table and the Pad Summary Ownership tab — dates, extensions, royalty, deduct language, pooling, Pugh, etc. Upload one file per lease.</td></tr>
         </tbody>
       </table>
       <div class="tip"><strong>Big files are fine.</strong> A 140-page opinion or 230-page abstract is read in a few seconds in your browser.</div>
+      <div class="tip"><strong>Scanned or handwritten leases</strong> (no usable text layer, e.g. old cursive leases) are read page-by-page from the image by the AI. Expect roughly 20–40 seconds per 4 pages; the checklist shows the page count and a timer. Check names, dates and acreage on these — handwriting can be misread, and unclear words are marked [?].</div>
     </section>
 
     <section id="step3">
@@ -230,6 +231,9 @@
     <section id="step4">
       <h2>Step 4 — Review the CAR</h2>
       <p>Every section of the CAR form appears as an editable panel, in the same order as the Word document. Tables have <code>+ Add row</code> and <code>Delete</code>; empty tables print "N/A".</p>
+      <div class="tip"><strong>Page-1 clouds:</strong> each numbered line in a Curative Summary box prints as its own row in the CAR.</div>
+      <div class="tip"><strong>Outsales and wells</strong> list everything from the title opinion(s) plus the TMC (outsales) or abstract (wells), with duplicates removed — outsales are listed whether they are before or after the lease.</div>
+      <div class="tip"><strong>Ownership changes after the opinion:</strong> if the bringdown shows a deed that changes vesting, the owners are updated and a note appears under "Notes for reviewer" — confirm it.</div>
       <div class="tip warn"><strong>Check the Curative Summary last.</strong> It is built from the items marked as open, but once you edit recommendations below it does not rebuild — update it to match.</div>
       <div class="tip"><strong>Curative items:</strong> left box is the title defect copied from the opinion, right box is the CNX Recommendation/Status. Compare the defect text against the opinion for anything cut off at page breaks.</div>
     </section>
@@ -303,7 +307,7 @@
       <h2>Known Limitations</h2>
       <div class="tip warn"><strong>Instrument numbers for releases</strong> are often not in the bringdown text — look them up and add them to the Liens table.</div>
       <div class="tip warn"><strong>"Lease in Other CNX Units?", BA #, QDO codes and Land Ops / D.O. approval columns</strong> are internal CNX data and are left blank.</div>
-      <div class="tip"><strong>Scanned leases</strong> need the Google Document AI settings (same as the Run Sheet Generator). Text-based leases work without them.</div>
+      <div class="tip"><strong>Scanned leases</strong> are read by the AI from the page images — no extra setup needed.</div>
     </section>
 
     <section id="faq">

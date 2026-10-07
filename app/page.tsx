@@ -1,9 +1,11 @@
 'use client';
 
 import { useState } from 'react';
-import { upload } from '@vercel/blob/client';
-import { pdfPages } from '@/lib/pdf-text';
-import { stripRunningHeaders, joinPages, abstractExcerpt, textCoverage } from '@/lib/text-clean';
+import { pdfPages, pdfPageImages } from '@/lib/pdf-text';
+import {
+  stripRunningHeaders, joinPages, abstractExcerpt, pagesNeedingVision, tmcResolvedAcreage, opinionDateFromText,
+} from '@/lib/text-clean';
+import type { OpinionText } from '@/lib/claude';
 import { assemble, mergeCurative, normalizeCar, padFromCar } from '@/lib/assemble';
 import { OWNERSHIP_COLUMNS, TITLE_CURATIVE_COLUMNS } from '@/lib/pad-columns';
 import type {
@@ -68,7 +70,7 @@ export default function Home() {
   const [mode, setMode] = useState<'choose' | 'car' | 'pad'>('choose');
   const [form, setForm] = useState<FormInfo>({ ...emptyForm });
   const [carDocFile, setCarDocFile] = useState<File | null>(null);
-  const [opinionFile, setOpinionFile] = useState<File | null>(null);
+  const [opinionFiles, setOpinionFiles] = useState<File[]>([]);
   const [tmcFile, setTmcFile] = useState<File | null>(null);
   const [bringdownFile, setBringdownFile] = useState<File | null>(null);
   const [abstractFile, setAbstractFile] = useState<File | null>(null);
@@ -98,28 +100,64 @@ export default function Home() {
 
   // ---------------- pipeline ----------------
   function stepSet(id: string, status: StepStatus, detail?: string) {
-    setSteps((prev) => prev.map((s) => (s.id === id ? { ...s, status, detail: detail ?? s.detail } : s)));
+    setSteps((prev) => prev.map((s) => {
+      if (s.id !== id) return s;
+      const t = Date.now();
+      return {
+        ...s, status, detail: detail ?? s.detail,
+        started: s.started ?? (status === 'running' ? t : undefined),
+        ended: status === 'done' || status === 'error' ? (s.ended ?? t) : undefined,
+      };
+    }));
   }
 
-  async function ocrFile(file: File): Promise<string> {
-    const blob = await upload(file.name, file, { access: 'public', handleUploadUrl: '/api/upload-url' });
-    const { text } = await postJson<{ text: string }>('/api/ocr', { url: blob.url });
-    return text;
+  /** Reads scanned / handwritten pages with Claude (page images rendered in the browser, sent a few at a time). */
+  async function readPagesWithVision(file: File, pageIdx: number[], id: string): Promise<Map<number, string>> {
+    const out = new Map<number, string>();
+    const BATCH = 4;
+    const batches: number[][] = [];
+    for (let i = 0; i < pageIdx.length; i += BATCH) batches.push(pageIdx.slice(i, i + BATCH));
+    let done = 0;
+    const worker = async (batch: number[]) => {
+      const images = await pdfPageImages(file, batch);
+      const { text } = await postJson<{ text: string }>('/api/vision', { filename: file.name, images });
+      // split "[Page N]" markers back out
+      const parts = text.split(/\[Page (\d+)\]/);
+      if (parts.length < 3) out.set(batch[0], text);
+      for (let k = 1; k < parts.length; k += 2) out.set(parseInt(parts[k], 10) - 1, (parts[k + 1] || '').trim());
+      done += batch.length;
+      stepSet(id, 'running', `reading scanned pages with AI — ${done} of ${pageIdx.length}`);
+    };
+    // up to 4 batches at a time
+    const queue = [...batches];
+    await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
+      while (queue.length) await worker(queue.shift()!);
+    }));
+    return out;
   }
 
-  /** Text of a PDF; falls back to OCR when the PDF has no text layer. */
+  /** Text of a PDF. Scanned or handwritten pages (no usable text layer) are read from the page image by Claude. */
   async function readPdf(file: File, id: string, mode: 'full' | 'abstract'): Promise<string> {
     stepSet(id, 'running', 'reading text…');
     const pages = await pdfPages(file, (d, t) => stepSet(id, 'running', `page ${d} of ${t}`));
-    const cleaned = stripRunningHeaders(pages);
-    const text = mode === 'abstract' ? abstractExcerpt(cleaned) : joinPages(cleaned);
-    if (text.length < 1500 && textCoverage(pages) < 0.3) {
-      if (mode === 'abstract') { stepSet(id, 'done', 'scanned — skipped (abstract is optional)'); return ''; }
-      stepSet(id, 'running', 'scanned PDF — running OCR…');
-      const ocr = await ocrFile(file);
-      stepSet(id, 'done', `${pages.length} pages (OCR)`);
-      return ocr;
+    if (mode === 'abstract') {
+      const text = abstractExcerpt(stripRunningHeaders(pages));
+      stepSet(id, 'done', text ? `${pages.length} pages, ${Math.round(text.length / 1000)}k chars used` : 'scanned — skipped (abstract is optional)');
+      return text;
     }
+    // leases: read images unless there's plenty of good text; other documents: only when essentially no text layer
+    const need = pagesNeedingVision(pages, /lease-/.test(id) ? 15000 : 3000);
+    if (need.length) {
+      const MAX = 60;
+      const use = need.slice(0, MAX);
+      stepSet(id, 'running', `scanned/handwritten — reading ${use.length} page(s) with AI…`);
+      const read = await readPagesWithVision(file, use, id);
+      read.forEach((t, i) => { pages[i] = t; });
+      const text = joinPages(stripRunningHeaders(pages), { minChars: 20 });
+      stepSet(id, 'done', `${pages.length} pages (${use.length} read from images${need.length > MAX ? `; first ${MAX} only` : ''})`);
+      return text;
+    }
+    const text = joinPages(stripRunningHeaders(pages));
     stepSet(id, 'done', `${pages.length} pages, ${Math.round(text.length / 1000)}k chars`);
     return text;
   }
@@ -136,22 +174,53 @@ export default function Home() {
     return data.text as string;
   }
 
+  /** Reads every title opinion and orders them oldest → newest by the letter date on page 1. */
+  async function readOpinions(files: File[]): Promise<OpinionText[]> {
+    const read = await Promise.all(files.map(async (file, i) => {
+      const text = await readPdf(file, `opinion-${i}`, 'full');
+      const d = opinionDateFromText(text);
+      if (d) stepSet(`opinion-${i}`, 'done', `dated ${d.mdy}`);
+      return { label: file.name, date: d?.mdy || '', time: d?.time ?? i, text };
+    }));
+    return read.sort((a, b) => a.time - b.time).map(({ label, date, text }) => ({ label, date, text }));
+  }
+
+  async function readLeases(reviewDate: string): Promise<LeaseInfo[]> {
+    const leaseResults = await Promise.all(leaseFiles.map(async (lf, i) => {
+      const id = `lease-${i}`;
+      try {
+        const text = await readPdf(lf, id, 'full');
+        stepSet(id, 'running', 'extracting lease terms…');
+        const { result } = await postJson<{ result: LeaseInfo }>('/api/analyze', { task: 'lease', text, filename: lf.name, reviewDate });
+        stepSet(id, 'done', `${result.lessors || 'lease'} — ${result.effective_date || ''}`);
+        return result;
+      } catch (e) {
+        stepSet(id, 'error', e instanceof Error ? e.message : String(e));
+        return null;
+      }
+    }));
+    return leaseResults.filter(Boolean) as LeaseInfo[];
+  }
+
   async function generate() {
-    if (!opinionFile) { showStatus('Please upload the Title Opinion PDF', 'error'); return; }
+    if (!opinionFiles.length) { showStatus('Please upload the Title Opinion PDF(s)', 'error'); return; }
     const reviewDate = /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(form.reviewDate.trim()) ? form.reviewDate.trim() : todayMDY();
     const f: FormInfo = { ...form, reviewDate };
     setForm(f);
 
     const initial: Step[] = [
-      { id: 'opinion', label: `Title Opinion — ${opinionFile.name}`, status: 'pending' },
+      ...opinionFiles.map((of, i) => ({ id: `opinion-${i}`, label: `Title Opinion — ${of.name}`, status: 'pending' as StepStatus })),
       { id: 'tmc', label: tmcFile ? `Title Mapping Curative — ${tmcFile.name}` : 'Title Mapping Curative (not provided)', status: tmcFile ? 'pending' : 'skipped' },
       { id: 'bringdown', label: bringdownFile ? `Bringdown — ${bringdownFile.name}` : 'Bringdown (not provided)', status: bringdownFile ? 'pending' : 'skipped' },
       { id: 'abstract', label: abstractFile ? `Abstract — ${abstractFile.name}` : 'Abstract (not provided)', status: abstractFile ? 'pending' : 'skipped' },
       ...leaseFiles.map((lf, i) => ({ id: `lease-${i}`, label: `Lease — ${lf.name}`, status: 'pending' as StepStatus })),
-      { id: 'core', label: 'Header, leasehold, wells, encumbrances', status: 'pending' },
-      { id: 'cur1', label: 'Specific curative items + recommendations', status: 'pending' },
-      { id: 'cur2', label: 'General / non-action items, comments & limitations', status: 'pending' },
-      { id: 'own', label: 'Owners by parcel (CAR + Pad Summary Ownership)', status: 'pending' },
+      { id: 'core', label: 'Header, leasehold, outsales, encumbrances', status: 'pending' },
+      { id: 'wells', label: 'Wells (title opinion + abstract)', status: 'pending' },
+      ...opinionFiles.flatMap((_, i) => [
+        { id: `cur1-${i}`, label: `Specific curative items — opinion ${i + 1}`, status: 'pending' as StepStatus },
+        { id: `cur2-${i}`, label: `General / non-action items, comments & limitations — opinion ${i + 1}`, status: 'pending' as StepStatus },
+      ]),
+      { id: 'own', label: 'Owners by parcel — newest opinion + bringdown changes', status: 'pending' },
     ];
     setSteps(initial);
     setIsProcessing(true);
@@ -161,35 +230,25 @@ export default function Home() {
     showStatus('Reading documents in your browser…', 'info');
 
     try {
-      // 1. text — runs in the browser; only scanned PDFs are uploaded for OCR
-      const [opinion, tmc, bringdown, abstract] = await Promise.all([
-        readPdf(opinionFile, 'opinion', 'full'),
+      // 1. text — runs in the browser; scanned/handwritten pages are read from images by Claude
+      const [opinions, tmc, bringdown, abstract] = await Promise.all([
+        readOpinions(opinionFiles),
         tmcFile ? readPdf(tmcFile, 'tmc', 'full').catch((e) => { stepSet('tmc', 'error', e.message); return ''; }) : Promise.resolve(''),
         bringdownFile ? readBringdown(bringdownFile).catch((e) => { stepSet('bringdown', 'error', e.message); return ''; }) : Promise.resolve(''),
         abstractFile ? readPdf(abstractFile, 'abstract', 'abstract').catch((e) => { stepSet('abstract', 'error', e.message); return ''; }) : Promise.resolve(''),
       ]);
+      const newest = opinions[opinions.length - 1];
+      const tmcAcreage = tmcResolvedAcreage(tmc);
+      if (tmcFile) stepSet('tmc', 'done', tmcAcreage ? `resolved acreage ${tmcAcreage.total}` : 'resolved acreage line not found — check the CAR');
 
       // 2. leases (parallel)
       showStatus('Analyzing leases…', 'info');
-      const leaseResults = await Promise.all(leaseFiles.map(async (lf, i) => {
-        const id = `lease-${i}`;
-        try {
-          const text = await readPdf(lf, id, 'full');
-          stepSet(id, 'running', 'extracting lease terms…');
-          const { result } = await postJson<{ result: LeaseInfo }>('/api/analyze', { task: 'lease', text, filename: lf.name, reviewDate });
-          stepSet(id, 'done', `${result.lessors || 'lease'} — ${result.effective_date || ''}`);
-          return result;
-        } catch (e) {
-          stepSet(id, 'error', e instanceof Error ? e.message : String(e));
-          return null;
-        }
-      }));
-      const leases = leaseResults.filter(Boolean) as LeaseInfo[];
+      const leases = await readLeases(reviewDate);
 
       // 3. CAR + Pad analysis (parallel)
       showStatus('Building the CAR and Pad Summary (this usually takes 2–4 minutes)…', 'info');
-      const sources = { opinion, tmc, bringdown, abstract, leases, reviewDate };
-      const run = async <T,>(id: string, task: string): Promise<T> => {
+      const base = { opinions, tmc, bringdown, abstract, leases, reviewDate };
+      const run = async <T,>(id: string, task: string, sources: object): Promise<T> => {
         stepSet(id, 'running', 'analyzing…');
         try {
           const { result } = await postJson<{ result: T }>('/api/analyze', { task, sources });
@@ -200,35 +259,54 @@ export default function Home() {
           throw e;
         }
       };
-      const settled = await Promise.allSettled([
-        run<CoreExtract>('core', 'core'),
-        run<CurativeExtract>('cur1', 'curative-specific'),
-        run<CurativeExtract>('cur2', 'curative-other'),
-        run<OwnershipExtract>('own', 'ownership'),
-      ]);
-      const val = <T,>(i: number): T | null => (settled[i].status === 'fulfilled' ? (settled[i] as PromiseFulfilledResult<T>).value : null);
-      const core = val<CoreExtract>(0);
-      const cur1 = val<CurativeExtract>(1);
-      const cur2 = val<CurativeExtract>(2);
-      const own = val<OwnershipExtract>(3);
+      const coreP = run<CoreExtract>('core', 'core', { ...base, opinion: newest.text });
+      const wellsP = run<{ wells: string[][]; notes: string }>('wells', 'wells', { ...base, opinion: newest.text });
+      const curP = opinions.map((op, i) => {
+        const src = { ...base, opinions: undefined, opinion: op.text, newerOpinion: i < opinions.length - 1 ? newest.text : undefined };
+        return Promise.allSettled([
+          run<CurativeExtract>(`cur1-${i}`, 'curative-specific', src),
+          run<CurativeExtract>(`cur2-${i}`, 'curative-other', src),
+        ]);
+      });
+      const titleQls = (newest.text.slice(0, 6000).match(/\b(\d{6}-\d{3})\b/) || opinionFiles[0].name.match(/(\d{6}-\d{3})/) || ['', ''])[1];
+      const ownP = run<OwnershipExtract>('own', 'ownership', { ...base, opinions: undefined, opinion: newest.text, titleQls });
+      const [coreR, wellsR, ownR, ...curR] = await Promise.allSettled([coreP, wellsP, ownP, ...curP]);
+      const core = coreR.status === 'fulfilled' ? coreR.value : null;
       if (!core) throw new Error('The header/leasehold step failed — see the error above and try again.');
+      const wellsOut = wellsR.status === 'fulfilled' ? wellsR.value : null;
+      const own = ownR.status === 'fulfilled' ? ownR.value : null;
 
-      const items: CuratorItemExtract[] = mergeCurative(cur1?.items || [], cur2?.items || []);
+      const curativeByOpinion = opinions.map((op, i) => {
+        const pair = curR[i].status === 'fulfilled' ? (curR[i] as PromiseFulfilledResult<PromiseSettledResult<CurativeExtract>[]>).value : [];
+        const c1 = pair[0]?.status === 'fulfilled' ? pair[0].value : null;
+        const c2 = pair[1]?.status === 'fulfilled' ? pair[1].value : null;
+        const items: CuratorItemExtract[] = mergeCurative(c1?.items || [], c2?.items || []);
+        const fallbackHeading = core.opinions?.[i] ? `${core.opinions[i].opinion_date} ${core.opinions[i].law_firm} - ` : (op.date ? `${op.date} - ` : '');
+        return { heading: c1?.heading || c2?.heading || fallbackHeading, items };
+      });
+
       const built = assemble({
         form: f,
         core,
-        curativeItems: items,
-        curativeHeading: cur1?.heading || cur2?.heading,
-        miscNotes: cur2?.misc_notes,
+        curativeByOpinion,
         ownership: own || { parcels: [], owners: [], title_notes: '' },
         leases,
+        wells: wellsOut?.wells || [],
+        tmcAcreage,
       });
       setCar(built.car);
       setPad(built.pad);
-      const notes = [core.notes_for_reviewer, ...leases.map((l) => l.notes_for_reviewer ? `${l.source_file}: ${l.notes_for_reviewer}` : '')]
-        .filter((n) => n && n.trim());
+      const notes = [
+        opinions.length > 1 ? `Title opinions ordered oldest → newest: ${opinions.map((o) => `${o.date || '?'} (${o.label})`).join(', ')}. Ownership uses the newest.` : '',
+        own?.bringdown_changes ? `Ownership changed per bringdown: ${own.bringdown_changes}` : '',
+        tmcFile && !tmcAcreage ? 'Could not find the "Resolved Mapping Acreage" line on the TMC — check FINAL Resolved Acreage.' : '',
+        wellsOut?.notes ? `Wells: ${wellsOut.notes}` : '',
+        core.notes_for_reviewer,
+        ...leases.map((l) => (l.notes_for_reviewer ? `${l.source_file}: ${l.notes_for_reviewer}` : '')),
+      ].filter((n) => n && n.trim());
       setReviewNotes(notes);
-      const failed = settled.filter((s) => s.status === 'rejected').length;
+      const failed = [wellsR, ownR].filter((x) => x.status === 'rejected').length
+        + curR.reduce((n, r) => n + (r.status === 'fulfilled' ? (r.value as PromiseSettledResult<unknown>[]).filter((x) => x.status === 'rejected').length : 2), 0);
       showStatus(failed
         ? `Done with ${failed} step(s) failing — those sections are empty. Review below, fill gaps, then export.`
         : 'Done. Review and edit everything below (red text in the CAR = analyst entries), then export.', failed ? 'info' : 'success');
@@ -247,10 +325,12 @@ export default function Home() {
     setForm(f);
     const initial: Step[] = [
       { id: 'cardoc', label: `CAR — ${carDocFile.name}`, status: 'pending' },
-      { id: 'opinion', label: opinionFile ? `Title Opinion — ${opinionFile.name}` : 'Title Opinion (not provided — owners taken from the CAR)', status: opinionFile ? 'pending' : 'skipped' },
+      ...(opinionFiles.length
+        ? opinionFiles.map((of, i) => ({ id: `opinion-${i}`, label: `Title Opinion — ${of.name}`, status: 'pending' as StepStatus }))
+        : [{ id: 'opinion-none', label: 'Title Opinion (not provided — owners taken from the CAR)', status: 'skipped' as StepStatus }]),
       { id: 'tmc', label: tmcFile ? `Title Mapping Curative — ${tmcFile.name}` : 'Title Mapping Curative (not provided)', status: tmcFile ? 'pending' : 'skipped' },
       ...leaseFiles.map((lf, i) => ({ id: `lease-${i}`, label: `Lease — ${lf.name}`, status: 'pending' as StepStatus })),
-      ...(opinionFile ? [{ id: 'own', label: 'Owners, addresses and acres by parcel', status: 'pending' as StepStatus }] : []),
+      ...(opinionFiles.length ? [{ id: 'own', label: 'Owners, addresses and acres by parcel (newest opinion)', status: 'pending' as StepStatus }] : []),
     ];
     setSteps(initial);
     setIsProcessing(true);
@@ -270,25 +350,15 @@ export default function Home() {
       stepSet('cardoc', 'done', `${parsed.qls} — ${parsed.parcels.length} parcel(s), ${ownerCount} owner row(s)`);
 
       const [opinion, tmc] = await Promise.all([
-        opinionFile ? readPdf(opinionFile, 'opinion', 'full').catch((e) => { stepSet('opinion', 'error', e.message); return ''; }) : Promise.resolve(''),
+        opinionFiles.length ? readOpinions(opinionFiles).then((ops) => ops[ops.length - 1]?.text || '').catch((e) => { stepSet('opinion-0', 'error', e.message); return ''; }) : Promise.resolve(''),
         tmcFile ? readPdf(tmcFile, 'tmc', 'full').catch((e) => { stepSet('tmc', 'error', e.message); return ''; }) : Promise.resolve(''),
       ]);
 
+      const tmcAcreage = tmcResolvedAcreage(tmc);
+      if (tmcFile) stepSet('tmc', 'done', tmcAcreage ? `resolved acreage ${tmcAcreage.total}` : 'resolved acreage line not found');
+
       showStatus('Analyzing leases…', 'info');
-      const leaseResults = await Promise.all(leaseFiles.map(async (lf, i) => {
-        const id = `lease-${i}`;
-        try {
-          const text = await readPdf(lf, id, 'full');
-          stepSet(id, 'running', 'extracting lease terms…');
-          const { result } = await postJson<{ result: LeaseInfo }>('/api/analyze', { task: 'lease', text, filename: lf.name, reviewDate });
-          stepSet(id, 'done', `${result.lessors || 'lease'} — ${result.effective_date || ''}`);
-          return result;
-        } catch (e) {
-          stepSet(id, 'error', e instanceof Error ? e.message : String(e));
-          return null;
-        }
-      }));
-      const leases = leaseResults.filter(Boolean) as LeaseInfo[];
+      const leases = await readLeases(reviewDate);
 
       let aiOwnership: OwnershipExtract | null = null;
       if (opinion) {
@@ -296,7 +366,7 @@ export default function Home() {
         stepSet('own', 'running', 'analyzing…');
         try {
           const { result } = await postJson<{ result: OwnershipExtract }>('/api/analyze', {
-            task: 'ownership', sources: { opinion, tmc, bringdown: '', abstract: '', leases, reviewDate },
+            task: 'ownership', sources: { opinion, tmc, bringdown: '', abstract: '', leases, reviewDate, titleQls: parsed.qls },
           });
           aiOwnership = result;
           stepSet('own', 'done', `${result.owners?.length || 0} owner row(s)`);
@@ -307,7 +377,7 @@ export default function Home() {
 
       if (!f.analyst && parsed.analyst) setForm((x) => ({ ...x, analyst: parsed.analyst }));
       setCar(parsed);
-      setPad(padFromCar(parsed, f, leases, aiOwnership));
+      setPad(padFromCar(parsed, f, leases, aiOwnership, tmcAcreage));
       const notes: string[] = [];
       if (!aiOwnership) notes.push('Owner addresses (column J) and per-parcel acres (AF/AG) are not on the CAR — add the Title Opinion and TMC to fill them, or type them in below.');
       leases.forEach((l) => { if (l.notes_for_reviewer) notes.push(`${l.source_file}: ${l.notes_for_reviewer}`); });
@@ -458,7 +528,7 @@ export default function Home() {
             </div>
             <div className="form-group">
               <label>{'Title Opinion (PDF) — optional'}</label>
-              <input type="file" accept=".pdf" onChange={(e) => setOpinionFile(e.target.files?.[0] || null)} />
+              <input type="file" accept=".pdf" multiple onChange={(e) => setOpinionFiles(Array.from(e.target.files || []))} />
               <div className="hint">{'Adds owner addresses and per-parcel deeded acres (not on the CAR).'}</div>
             </div>
             <div className="form-group">
@@ -481,7 +551,7 @@ export default function Home() {
       <div className="grid-2">
         <div className="form-group">
           <label>{'Title Opinion (PDF) *'}</label>
-          <input type="file" accept=".pdf" onChange={(e) => setOpinionFile(e.target.files?.[0] || null)} />
+          <input type="file" accept=".pdf" multiple onChange={(e) => setOpinionFiles(Array.from(e.target.files || []))} />
           <div className="hint">{'Main source for almost every section of the CAR.'}</div>
         </div>
         <div className="form-group">
@@ -560,7 +630,7 @@ export default function Home() {
             </div>
           </Section>
 
-          <Section title="Curative Summary (page 1)" note="built from the open items below">
+          <Section title="Curative Summary (page 1)" note="each numbered line prints as its own row in the CAR">
             <Field textarea label="Land Curative Recommendations" value={car.curativeSummary.land} onChange={(v) => updateCar((d) => { d.curativeSummary.land = v; })} />
             <Field textarea label="Mapping Curative Recommendations" value={car.curativeSummary.mapping} onChange={(v) => updateCar((d) => { d.curativeSummary.mapping = v; })} />
             <Field textarea label="Title Curative Recommendations" value={car.curativeSummary.title} onChange={(v) => updateCar((d) => { d.curativeSummary.title = v; })} />
@@ -642,27 +712,39 @@ export default function Home() {
             </div>
           </Section>
 
-          <Section title="Curative Items and Recommendations" note={`${car.curativeSections.reduce((n, s) => n + s.items.length, 0)} items`}>
-            <Field label="Table heading prefix (opinion date + law firm)" value={car.curativeHeading} onChange={(v) => updateCar((d) => { d.curativeHeading = v; })} />
-            {car.curativeSections.map((sec, si) => (
-              <div key={si} className="sub-block">
+          <Section title="Curative Items and Recommendations"
+            note={`${car.curativeBlocks.length} title opinion table(s), ${car.curativeBlocks.reduce((n, b) => n + b.sections.reduce((m, s) => m + s.items.length, 0), 0)} items — oldest opinion first`}>
+            {car.curativeBlocks.map((block, bi) => (
+              <div key={bi} className="cur-block">
                 <div className="sec-head">
-                  <input type="text" value={sec.title} onChange={(e) => updateCar((d) => { d.curativeSections[si].title = e.target.value; })} />
-                  <button className="btn-small danger" onClick={() => updateCar((d) => { d.curativeSections.splice(si, 1); })}>{'Remove section'}</button>
+                  <strong style={{ whiteSpace: 'nowrap' }}>{`Opinion ${bi + 1}`}</strong>
+                  <input type="text" value={block.heading} placeholder="Heading prefix, e.g. 6/25/2026 Bowles Rice - "
+                    onChange={(e) => updateCar((d) => { d.curativeBlocks[bi].heading = e.target.value; })} />
+                  {bi > 0 && <button className="btn-small" onClick={() => updateCar((d) => { const [b] = d.curativeBlocks.splice(bi, 1); d.curativeBlocks.splice(bi - 1, 0, b); })}>{'↑ Move up'}</button>}
+                  {car.curativeBlocks.length > 1 && <button className="btn-small danger" onClick={() => updateCar((d) => { d.curativeBlocks.splice(bi, 1); })}>{'Remove table'}</button>}
                 </div>
-                {sec.items.map((it, ii) => (
-                  <div key={ii} className="cur-item">
-                    <textarea className="cur-defect" rows={6} value={it.defect}
-                      onChange={(e) => updateCar((d) => { d.curativeSections[si].items[ii].defect = e.target.value; })} />
-                    <textarea className="cur-rec" rows={6} value={it.recommendation} placeholder="CNX Recommendation/Status"
-                      onChange={(e) => updateCar((d) => { d.curativeSections[si].items[ii].recommendation = e.target.value; })} />
-                    <button className="btn-small danger" onClick={() => updateCar((d) => { d.curativeSections[si].items.splice(ii, 1); })}>{'✕'}</button>
+                {block.sections.map((sec, si) => (
+                  <div key={si} className="sub-block">
+                    <div className="sec-head">
+                      <input type="text" value={sec.title} onChange={(e) => updateCar((d) => { d.curativeBlocks[bi].sections[si].title = e.target.value; })} />
+                      <button className="btn-small danger" onClick={() => updateCar((d) => { d.curativeBlocks[bi].sections.splice(si, 1); })}>{'Remove section'}</button>
+                    </div>
+                    {sec.items.map((it, ii) => (
+                      <div key={ii} className="cur-item">
+                        <textarea className="cur-defect" rows={6} value={it.defect}
+                          onChange={(e) => updateCar((d) => { d.curativeBlocks[bi].sections[si].items[ii].defect = e.target.value; })} />
+                        <textarea className="cur-rec" rows={6} value={it.recommendation} placeholder="CNX Recommendation/Status"
+                          onChange={(e) => updateCar((d) => { d.curativeBlocks[bi].sections[si].items[ii].recommendation = e.target.value; })} />
+                        <button className="btn-small danger" onClick={() => updateCar((d) => { d.curativeBlocks[bi].sections[si].items.splice(ii, 1); })}>{'✕'}</button>
+                      </div>
+                    ))}
+                    <button className="btn-small" onClick={() => updateCar((d) => { d.curativeBlocks[bi].sections[si].items.push({ defect: '', recommendation: '' }); })}>{'+ Add item'}</button>
                   </div>
                 ))}
-                <button className="btn-small" onClick={() => updateCar((d) => { d.curativeSections[si].items.push({ defect: '', recommendation: '' }); })}>{'+ Add item'}</button>
+                <button className="btn-small" onClick={() => updateCar((d) => { d.curativeBlocks[bi].sections.push({ title: 'INTERNAL BRINGDOWN ITEMS', items: [] }); })}>{'+ Add section'}</button>
               </div>
             ))}
-            <button className="btn-small" onClick={() => updateCar((d) => { d.curativeSections.push({ title: 'INTERNAL BRINGDOWN ITEMS', items: [] }); })}>{'+ Add section'}</button>
+            <button className="btn-small" onClick={() => updateCar((d) => { d.curativeBlocks.push({ heading: '', sections: [{ title: 'SPECIFIC CURATIVE ACTION ITEMS', items: [] }] }); })}>{'+ Add title opinion table'}</button>
             <Field textarea label="Miscellaneous/Additional Title Notes" value={car.miscNotes} onChange={(v) => updateCar((d) => { d.miscNotes = v; })} />
           </Section>
 

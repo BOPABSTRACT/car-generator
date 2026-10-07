@@ -7,7 +7,7 @@ import { normalizeCar } from './assemble';
 import {
   parseXml, serializeXml, findTable, findTables, rows, cells, setCellText, appendCellText,
   prependCellText, setCellAnswer, replaceRows, removeNode, insertBefore, findParagraph,
-  cloneParagraphWithText, emptyParagraph, kids, textOf, norm,
+  cloneParagraphWithText, emptyParagraph, kids, textOf, norm, all,
 } from './docx-xml';
 
 const RED = 'FF0000';
@@ -16,6 +16,19 @@ function orNA(data: Row[], width: number, firstOnly = false): Row[] {
   const clean = (data || []).filter((r) => r && r.some((v) => (v || '').trim() !== ''));
   if (clean.length) return clean.map((r) => Array.from({ length: width }, (_, i) => r[i] ?? ''));
   return [Array.from({ length: width }, (_, i) => (firstOnly && i > 0 ? '' : 'N/A'))];
+}
+
+/** "1. Leasehold is open…\n2. Obtain a subordination…" → one entry per numbered cloud ("None" → []). */
+export function splitClouds(value: string): string[] {
+  const v = (value || '').replace(/\r/g, '').trim();
+  if (!v || /^none\.?$/i.test(v)) return [];
+  const lines = v.split('\n');
+  const out: string[] = [];
+  for (const line of lines) {
+    if (/^\s*\d+[.)]\s+/.test(line) || !out.length) out.push(line.trim());
+    else out[out.length - 1] += '\n' + line.trim();
+  }
+  return out.map((x) => x.trim()).filter(Boolean);
 }
 
 export async function buildCarDocx(template: Buffer | ArrayBuffer, input: CarData): Promise<Buffer> {
@@ -52,10 +65,17 @@ export async function buildCarDocx(template: Buffer | ArrayBuffer, input: CarDat
     ['TITLE CURATIVE RECOMMENDATIONS', car.curativeSummary.title],
     ['DIVISION ORDER', car.curativeSummary.divisionOrder],
   ];
+  // CNX analysts title the 4th box "DIVISION ORDER RECOMMENDATIONS" (the 2023 form says "ITEMS")
+  {
+    const t = findTable(body, 'DIVISION ORDER');
+    setCellText(cells(rows(t)[0])[0], 'DIVISION ORDER RECOMMENDATIONS');
+  }
   for (const [label, value] of summary) {
     const t = findTable(body, label);
-    const v = (value || '').trim() || 'None';
-    setCellText(cells(rows(t)[1])[0], v, { color: v === 'None' ? '000000' : RED });
+    const clouds = splitClouds(value);
+    // one row per cloud (the template has a single value row — clone it)
+    replaceRows(t, 1, rows(t).length - 1, (clouds.length ? clouds : ['None']).map((c) => [c]),
+      { color: clouds.length ? RED : '000000' });
   }
 
   // ---------- Final operating leasehold summary ----------
@@ -153,32 +173,41 @@ export async function buildCarDocx(template: Buffer | ArrayBuffer, input: CarDat
     setCellText(cells(r[3])[0], `Restrictions that affect operations: ${ct.restrictions || ''}`);
   }
 
-  // ---------- Curative items ----------
+  // ---------- Curative items: one "Title Defects and Analysis" table per title opinion, oldest → newest ----------
   {
-    const t = findTable(body, car.curativeHeading ? 'Title Defects and Analysis' : 'Title Defects and Analysis');
-    const r = rows(t);
-    if (car.curativeHeading) prependCellText(cells(r[0])[0], car.curativeHeading);
-    const sectionProto = r[2].cloneNode(true);
-    // item prototype: first 2-cell row whose 2nd cell is red in the template, else row 3
-    const itemProto = (r.slice(3).find((x) => cells(x).length === 2 && /FF0000/i.test(serializeXml(cells(x)[1])))
-      || r[3]).cloneNode(true);
-    for (let i = r.length - 1; i >= 2; i--) removeNode(r[i]);
-    for (const sec of car.curativeSections || []) {
-      if (!sec.items?.length && !sec.title) continue;
-      const s = sectionProto.cloneNode(true);
-      setCellText(cells(s)[0], sec.title);
-      t.appendChild(s);
-      for (const it of sec.items || []) {
-        const row = itemProto.cloneNode(true);
-        const c = cells(row);
-        const defect = it.defect || '';
-        const firstLine = defect.split('\n')[0] || '';
-        const boldLabel = firstLine.length < 70 && /:\s*$/.test(firstLine);
-        setCellText(c[0], defect, { color: '000000', boldFirstLine: boldLabel, bold: boldLabel ? false : undefined });
-        setCellText(c[1], it.recommendation || '', { color: RED, bold: false });
-        t.appendChild(row);
+    const proto = findTable(body, 'Title Defects and Analysis');
+    const blocks = car.curativeBlocks?.length ? car.curativeBlocks : [{ heading: '', sections: [] }];
+    blocks.forEach((block, bi) => {
+      const t = proto.cloneNode(true);
+      // bookmarks inside the template table must stay unique when the table is repeated
+      if (bi > 0) for (const n of [...all(t, 'w:bookmarkStart'), ...all(t, 'w:bookmarkEnd')]) removeNode(n);
+      const r = rows(t);
+      if (block.heading) prependCellText(cells(r[0])[0], block.heading);
+      const sectionProto = r[2].cloneNode(true);
+      // item prototype: first 2-cell row whose 2nd cell is red in the template, else row 3
+      const itemProto = (r.slice(3).find((x) => cells(x).length === 2 && /FF0000/i.test(serializeXml(cells(x)[1])))
+        || r[3]).cloneNode(true);
+      for (let i = r.length - 1; i >= 2; i--) removeNode(r[i]);
+      for (const sec of block.sections || []) {
+        if (!sec.items?.length && !sec.title) continue;
+        const s = sectionProto.cloneNode(true);
+        setCellText(cells(s)[0], sec.title);
+        t.appendChild(s);
+        for (const it of sec.items || []) {
+          const row = itemProto.cloneNode(true);
+          const c = cells(row);
+          const defect = it.defect || '';
+          const firstLine = defect.split('\n')[0] || '';
+          const boldLabel = firstLine.length < 70 && /:\s*$/.test(firstLine);
+          setCellText(c[0], defect, { color: '000000', boldFirstLine: boldLabel, bold: boldLabel ? false : undefined });
+          setCellText(c[1], it.recommendation || '', { color: RED, bold: false });
+          t.appendChild(row);
+        }
       }
-    }
+      if (bi > 0) insertBefore(emptyParagraph(doc), proto);
+      insertBefore(t, proto);
+    });
+    removeNode(proto);
   }
   setCellText(cells(rows(findTable(body, 'Miscellaneous/Additional Title Notes'))[1])[0], car.miscNotes || 'None');
 

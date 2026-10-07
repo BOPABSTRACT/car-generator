@@ -55,9 +55,87 @@ export function textCoverage(pages: string[]): number {
 const WELL_RE = /\b(API|well|wells|permit|plugg|spud|operator|production|PADEP|DEP|completion|gas well|oil well)\b/i;
 
 /** Abstract excerpts: cover sheet / certification pages plus any page that talks about wells. */
-export function abstractExcerpt(pages: string[]): string {
+export function abstractExcerpt(pages: string[], maxChars = 100000): string {
   return joinPages(pages, {
-    maxChars: 60000,
+    maxChars,
     filter: (t, i) => i < 4 || WELL_RE.test(t),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Title Mapping Curative — "Resolved Mapping Acreage" (top of page 1)
+// ---------------------------------------------------------------------------
+export interface TmcAcreage { total: string; parts: string[]; line: string }
+
+/**
+ * Reads e.g. "Resolved Mapping Acreage: 0.29 acres (Lots 7 & 9) + 1.05 acres (Revised) = 1.34 acres (Surface, Oil and Gas)"
+ * → { total: "1.34 acres", parts: ["0.29", "1.05"] }. Uses the FIRST occurrence (page 1 = most recent/revised TMC).
+ */
+export function tmcResolvedAcreage(text: string): TmcAcreage | null {
+  if (!text) return null;
+  const m = text.match(/(?:resolved|final|mapped)\s+(?:mapping\s+|mapped\s+)?acre(?:age|s)\s*[:\-–]?\s*([^\n]*(?:\n(?!\s*\n)[^\n]*)?)/i);
+  if (!m) return null;
+  let line = m[1].replace(/\s+/g, ' ').trim();
+  // stop at the next field label on the same logical line
+  line = line.replace(/\b(Tax Info|Township|County|State|Law Firm|Date of Opinion)\b.*$/i, '').trim();
+  const num = (s: string) => (s.replace(/,/g, '').match(/\d*\.?\d+/) || [''])[0];
+  let total = '';
+  let parts: string[] = [];
+  if (line.includes('=')) {
+    const [lhs, rhs] = [line.slice(0, line.lastIndexOf('=')), line.slice(line.lastIndexOf('=') + 1)];
+    total = num(rhs);
+    parts = lhs.split('+').map(num).filter(Boolean);
+  } else {
+    total = num(line);
+  }
+  if (!total) return null;
+  return { total: `${total} acres`, parts, line };
+}
+
+// ---------------------------------------------------------------------------
+// Title opinion date (letter date near the top of page 1) — used to order multiple opinions
+// ---------------------------------------------------------------------------
+const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+
+export function opinionDateFromText(text: string): { mdy: string; time: number } | null {
+  const head = (text || '').slice(0, 4000);
+  const re = new RegExp(`\\b(${MONTHS.join('|')})\\s+(\\d{1,2}),?\\s+(\\d{4})\\b`, 'i');
+  const m = head.match(re);
+  if (m) {
+    const mo = MONTHS.indexOf(m[1].toLowerCase());
+    return { mdy: `${mo + 1}/${parseInt(m[2], 10)}/${m[3]}`, time: Date.UTC(+m[3], mo, +m[2]) };
+  }
+  const n = head.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/);
+  if (n) return { mdy: `${+n[1]}/${+n[2]}/${n[3]}`, time: Date.UTC(+n[3], +n[1] - 1, +n[2]) };
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Scanned-page detection (no text, or an OCR layer that is mostly garbage — e.g. cursive)
+// ---------------------------------------------------------------------------
+const COMMON = new Set(('the and of to in a is that for by with as be or on this said from at any all such lessor lessee ' +
+  'oil gas lease land lands premises party parties hereby day year county township state pennsylvania acres more less ' +
+  'which shall have has are it its his her their unto witness whereof deed book page recorded owner grantor grantee ' +
+  'royalty well wells drilling production term years paid under herein thereof same being part tract').split(' '));
+
+export function looksGarbled(text: string): boolean {
+  const words = (text || '').toLowerCase().match(/[a-z]{2,}/g) || [];
+  if (words.length < 40) return true;
+  const hits = words.filter((w) => COMMON.has(w)).length;
+  return hits / words.length < 0.12;
+}
+
+/**
+ * Page numbers (0-based) that should be read from the page IMAGE instead of the text layer.
+ * Returns [] when the document is mostly readable already (a few form pages with little text are normal),
+ * so only genuinely scanned / handwritten documents pay for image reading.
+ */
+export function pagesNeedingVision(pages: string[], maxGoodChars = 15000): number[] {
+  if (!pages.length) return [];
+  const flagged = pages.map((p, i) => ({ p, i })).filter(({ p }) => p.trim().length < 200 || looksGarbled(p)).map(({ i }) => i);
+  const flaggedSet = new Set(flagged);
+  // plenty of readable text already (e.g. a typed opinion with scanned exhibits) → don't read images
+  const goodChars = pages.reduce((n, p, i) => n + (flaggedSet.has(i) ? 0 : p.trim().length), 0);
+  if (goodChars >= maxGoodChars) return [];
+  return flagged.length / pages.length >= 0.3 ? flagged : [];
 }

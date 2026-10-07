@@ -5,7 +5,7 @@
 
 import type {
   CarData, PadData, CoreExtract, CurativeExtract, OwnershipExtract, LeaseInfo, FormInfo,
-  CurativeSection, CarOwnerRow, PadOwnershipRow, TitleCurativeRow, CuratorItemExtract,
+  CurativeSection, CarOwnerRow, PadOwnershipRow, TitleCurativeRow, CuratorItemExtract, CurativeBlock,
 } from './types';
 
 const ORDINALS = ['One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten',
@@ -144,10 +144,18 @@ export function normalizeCar(car: CarData): CarData {
   c.opinions = Array.isArray(c.opinions) ? c.opinions : [];
   c.wiTables = Array.isArray(c.wiTables) ? c.wiTables : [];
   c.parcels = Array.isArray(c.parcels) ? c.parcels : [];
-  c.curativeSections = (Array.isArray(c.curativeSections) ? c.curativeSections : []).map((sec) => ({
+  const cleanSections = (secs: CurativeSection[] | undefined) => (Array.isArray(secs) ? secs : []).map((sec) => ({
     title: sec.title || '',
     items: (sec.items || []).map((i) => ({ defect: String(i.defect ?? ''), recommendation: String(i.recommendation ?? '') })),
   }));
+  if (!Array.isArray(c.curativeBlocks) || !c.curativeBlocks.length) {
+    // sessions saved before multi-opinion support
+    c.curativeBlocks = [{ heading: c.curativeHeading || '', sections: cleanSections(c.curativeSections) }];
+  } else {
+    c.curativeBlocks = c.curativeBlocks.map((b) => ({ heading: b.heading || '', sections: cleanSections(b.sections) }));
+  }
+  delete c.curativeHeading;
+  delete c.curativeSections;
   return c;
 }
 
@@ -198,7 +206,9 @@ export function buildCurativeSections(items: CuratorItemExtract[]): CurativeSect
   for (const it of items) {
     const title = normSection(it.section);
     if (!map.has(title)) map.set(title, { title, items: [] });
-    map.get(title)!.items.push({ defect: it.defect, recommendation: it.recommendation });
+    // collapse blank lines the AI sometimes leaves inside an item (e.g. right after the label)
+    const defect = (it.defect || '').replace(/\n[ \t]*\n+/g, '\n').trim();
+    map.get(title)!.items.push({ defect, recommendation: it.recommendation });
   }
   return [...map.values()].sort((a, b) => {
     const ia = SECTION_ORDER.indexOf(a.title);
@@ -210,21 +220,113 @@ export function buildCurativeSections(items: CuratorItemExtract[]): CurativeSect
 function openActions(items: CuratorItemExtract[], team: string): string[] {
   return items
     .filter((i) => (i.status || '').toLowerCase() === 'open' && (i.team || '').toLowerCase() === team)
-    .map((i) => i.action || i.recommendation);
+    .map((i) => i.action || i.recommendation)
+    // the same cloud raised by several opinions → one row
+    .filter((v, idx, arr) => arr.findIndex((x) => x.toLowerCase().replace(/[^a-z0-9]/g, '') === v.toLowerCase().replace(/[^a-z0-9]/g, '')) === idx);
 }
 
 function splitTracts(s: string): string[] {
   return (s || '').split(/[,;\n]/).map((x) => x.trim()).filter(Boolean);
 }
 
+const digits = (v: string) => (v || '').replace(/\D/g, '');
+
+/** The lease QLS # — never the title opinion's QLS number. */
+function leaseQls(titleQls: string, ...candidates: (string | undefined)[]): string {
+  const t = digits(titleQls);
+  for (const c of candidates) {
+    const v = (c || '').trim();
+    if (!v) continue;
+    const d = digits(v);
+    if (t && d && (d === t || d.startsWith(t) || t.startsWith(d))) continue;
+    return v;
+  }
+  return '';
+}
+
+/** Normalised API number for de-duplication: "37-005-20051" / "005-20051" / "3700520051" → "00520051". */
+function apiKey(api: string): string {
+  let d = digits(api);
+  if (d.length >= 10 && d.startsWith('37')) d = d.slice(2);
+  if (d.length > 8) d = d.slice(0, 8);
+  return d;
+}
+
+/** Merge well rows that share an API number, keeping the most complete value in each column. */
+export function dedupeWells(rows: string[][]): string[][] {
+  const out: string[][] = [];
+  const byKey = new Map<string, string[]>();
+  for (const r of rows) {
+    const row = Array.from({ length: 7 }, (_, i) => (r[i] ?? '').toString().trim());
+    if (!row.some(Boolean)) continue;
+    const k = apiKey(row[0]);
+    const prev = k ? byKey.get(k) : undefined;
+    if (!prev) { out.push(row); if (k) byKey.set(k, row); continue; }
+    for (let i = 0; i < 7; i++) {
+      const a = prev[i];
+      const b = row[i];
+      if (!a || /^n\/a$/i.test(a)) prev[i] = b || a;
+      else if (b && b !== a && i === 6 && !a.includes(b)) prev[i] = `${a}; ${b}`;
+    }
+  }
+  return out;
+}
+
+/** Normalised book/page (or instrument) key for outsale de-duplication. */
+function bookPageKey(v: string): string {
+  const nums = (v || '').match(/\d+/g) || [];
+  return nums.length >= 2 ? `${nums[nums.length - 2]}/${nums[nums.length - 1]}` : nums.join('');
+}
+
+export function dedupeOutsales(rows: string[][]): string[][] {
+  const out: string[][] = [];
+  const seen = new Map<string, string[]>();
+  for (const r of rows) {
+    const row = Array.from({ length: 6 }, (_, i) => (r[i] ?? '').toString().trim());
+    if (!row.some(Boolean) || row.every((v) => !v || /^n\/a$/i.test(v))) continue;
+    const k = bookPageKey(row[0]);
+    const prev = k ? seen.get(k) : undefined;
+    if (!prev) { out.push(row); if (k) seen.set(k, row); continue; }
+    for (let i = 0; i < 6; i++) if (!prev[i] && row[i]) prev[i] = row[i];
+  }
+  return out;
+}
+
+export interface CurativeByOpinion {
+  heading: string;                 // "6/25/2026 Bowles Rice - "
+  items: CuratorItemExtract[];
+}
+
 export interface AssembleInput {
   form: FormInfo;
   core: CoreExtract;
-  curativeItems: CuratorItemExtract[];
+  /** one entry per title opinion, oldest → newest */
+  curativeByOpinion?: CurativeByOpinion[];
+  /** @deprecated single-opinion form */
+  curativeItems?: CuratorItemExtract[];
   curativeHeading?: string;
   miscNotes?: string;
   ownership: OwnershipExtract;
   leases: LeaseInfo[];
+  wells?: string[][];                                  // from the wells pass
+  tmcAcreage?: { total: string; parts: string[] } | null; // parsed from the TMC page 1
+}
+
+function miscText(v: string | undefined): string {
+  const t = (v || '').trim();
+  if (!t || /^(none|none of record\.?|n\/a)$/i.test(t)) return '';
+  return t;
+}
+
+function cleanItems(raw: CuratorItemExtract[]): CuratorItemExtract[] {
+  // CNX convention: general and non-action items are simply "Advisory" unless work is still open
+  return dedupeCurative(splitNumberedItems(raw || [])).map((it) => {
+    const sec = normSection(it.section);
+    if ((sec === SECTION_ORDER[1] || sec === SECTION_ORDER[2]) && (it.status || '').toLowerCase() !== 'open') {
+      return { ...it, recommendation: 'Advisory', status: 'advisory' };
+    }
+    return it;
+  });
 }
 
 export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
@@ -234,15 +336,25 @@ export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
     ...input.form,
     reviewDate: /^\d{1,2}\/\d{1,2}\/\d{4}$/.test((input.form.reviewDate || '').trim()) ? input.form.reviewDate.trim() : todayMDY(),
   };
-  // CNX convention: general and non-action items are simply "Advisory" unless work is still open
-  const items = dedupeCurative(splitNumberedItems(input.curativeItems || [])).map((it) => {
-    const sec = normSection(it.section);
-    if ((sec === SECTION_ORDER[1] || sec === SECTION_ORDER[2]) && (it.status || '').toLowerCase() !== 'open') {
-      return { ...it, recommendation: 'Advisory', status: 'advisory' };
-    }
-    return it;
-  });
-  const parcels = ownership.parcels?.length ? ownership.parcels : [{ label: 'Parcel One', tmp: (core.tmps || []).join(', '), deeded_acres: core.acres_title, resolved_acres: core.acres_resolved }];
+  const byOpinion: CurativeByOpinion[] = (input.curativeByOpinion && input.curativeByOpinion.length
+    ? input.curativeByOpinion
+    : [{ heading: input.curativeHeading ?? '', items: input.curativeItems || [] }]
+  ).map((b) => ({ heading: b.heading, items: cleanItems(b.items) }));
+  const items = byOpinion.flatMap((b) => b.items);
+
+  // FINAL resolved acreage: the TMC's page-1 "Resolved Mapping Acreage" line wins over the AI
+  const tmcTotal = input.tmcAcreage?.total || '';
+  const acresResolved = tmcTotal || core.acres_resolved || '';
+  const tmcParts = input.tmcAcreage?.parts || [];
+  const parcels = (ownership.parcels?.length ? ownership.parcels : [{ label: 'Parcel One', tmp: (core.tmps || []).join(', '), deeded_acres: core.acres_title, resolved_acres: '' }])
+    .map((p, i, all) => {
+      if ((p.resolved_acres || '').trim()) return p;
+      const num = (v: string) => ((v || '').replace(/,/g, '').match(/\d*\.?\d+/) || [''])[0];
+      if (all.length === 1) return { ...p, resolved_acres: num(acresResolved) };
+      if (tmcParts.length === all.length) return { ...p, resolved_acres: tmcParts[i] };
+      return p;
+    });
+  const titleQls = core.qls || '';
   const multi = parcels.length > 1;
   const tractNos = splitTracts(form.tractNumbers);
   const bdDate = core.bringdown?.date || '';
@@ -265,7 +377,7 @@ export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
         execRights: decimalString(o.exec_fraction),
         royaltyOwnership: decimalString(o.royalty_fraction),
         controlType: 'Lease',
-        agreementQls: o.qls_agreement || lease.agreement_number || '',
+        agreementQls: leaseQls(titleQls, o.qls_agreement, lease.agreement_number, lease.agreement_number_alt),
         recording: (lease.recording || '').replace(/^\s*(instr(ument)?\.?\s*(no\.?|number)?\s*#?\s*)/i, ''),
         royalty: royaltyDisplay(lease.royalty_rate, lease.gross_royalty),
         poolingLimit: poolingDisplay(lease.pooling_limitation),
@@ -285,11 +397,14 @@ export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
   const dor = openActions(items, 'division_order');
   const third = openActions(items, 'third_party');
 
-  const opinions = [{
-    lawFirm: core.law_firm || '',
-    certRange: core.cert_start || core.cert_end ? `${core.cert_start} to ${core.cert_end}` : '',
-    opinionDate: core.opinion_date || '',
-  }];
+  const opList = core.opinions && core.opinions.length
+    ? core.opinions
+    : [{ law_firm: core.law_firm, cert_start: core.cert_start, cert_end: core.cert_end, opinion_date: core.opinion_date }];
+  const opinions = opList.map((o) => ({
+    lawFirm: o.law_firm || '',
+    certRange: o.cert_start || o.cert_end ? `${o.cert_start} to ${o.cert_end}` : '',
+    opinionDate: o.opinion_date || '',
+  }));
   if (core.bringdown && (core.bringdown.date || core.bringdown.cert_end)) {
     opinions.push({
       lawFirm: 'Internal Bringdown',
@@ -305,7 +420,7 @@ export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
     opinions,
     estates: core.estates || '',
     acresTitle: core.acres_title || '',
-    acresResolved: core.acres_resolved || '',
+    acresResolved,
     curativeSummary: {
       land: numbered(land),
       mapping: numbered(mapping),
@@ -321,8 +436,8 @@ export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
     units: toRows(core.units),
     wellDateChecked: core.well_date_checked || form.reviewDate || '',
     leaseWideGaps: core.lease_wide_gaps || 'N/A',
-    wells: toRows(core.wells),
-    outsales: toRows(core.outsales),
+    wells: dedupeWells([...toRows(input.wells), ...toRows(core.wells)]),
+    outsales: dedupeOutsales(toRows(core.outsales)),
     liens: toRows(core.liens),
     taxFullyAssessed: core.tax_fully_assessed || '',
     taxDelinquent: core.tax_delinquent || 'N/A',
@@ -335,9 +450,11 @@ export function assemble(input: AssembleInput): { car: CarData; pad: PadData } {
       wellsDrilled: core.contracts?.wells_drilled || '',
       restrictions: core.contracts?.restrictions || '',
     },
-    curativeHeading: input.curativeHeading ?? (core.opinion_date || core.law_firm ? `${core.opinion_date} ${core.law_firm} - `.trimStart() : ''),
-    curativeSections: buildCurativeSections(items),
-    miscNotes: input.miscNotes || 'None',
+    curativeBlocks: byOpinion.map((b, i): CurativeBlock => ({
+      heading: b.heading || (i === byOpinion.length - 1 && (core.opinion_date || core.law_firm) ? `${core.opinion_date} ${core.law_firm} - `.trimStart() : ''),
+      sections: buildCurativeSections(b.items),
+    })),
+    miscNotes: miscText(core.misc_notes) || miscText(input.miscNotes) || 'None',
     analysisDate: form.reviewDate || '',
     analyst: form.analyst || '',
   };
@@ -420,7 +537,7 @@ export function buildPadOwnershipRows(args: {
         Object.assign(r, {
           D: lease.lessee || '',
           E: o.lease_status || 'Primary Term',
-          F: o.qls_agreement || lease.agreement_number || '',
+          F: leaseQls(qls, o.qls_agreement, lease.agreement_number, lease.agreement_number_alt),
           G: lease.lessors || '',
           H: lease.lessee || '',
           M: lease.effective_date || '',
@@ -559,12 +676,16 @@ export function matchLease(owner: { owner_name: string; tmp: string }, recording
  * Build the Pad Summary from a parsed CAR.
  * `aiOwnership` (from the title opinion, optional) supplies addresses, per-parcel acres and lease matches.
  */
-export function padFromCar(car: CarData, formIn: FormInfo, leases: LeaseInfo[], aiOwnership?: OwnershipExtract | null): PadData {
+export function padFromCar(
+  car: CarData, formIn: FormInfo, leases: LeaseInfo[], aiOwnership?: OwnershipExtract | null,
+  tmcAcreage?: { total: string; parts: string[] } | null,
+): PadData {
   const form = { ...formIn };
   const tractNos = splitTracts(form.tractNumbers);
   const ops = car.opinions || [];
   const bd = ops.find((o) => /bring\s*down/i.test(o.lawFirm));
-  const opinion = ops.find((o) => !/bring\s*down/i.test(o.lawFirm)) || ops[0];
+  const titleOps = ops.filter((o) => !/bring\s*down/i.test(o.lawFirm));
+  const opinion = titleOps[titleOps.length - 1] || ops[0];   // newest title opinion (CAR lists oldest → newest)
   const certEnd = (opinion?.certRange || '').split(/\s+to\s+/i)[1] || '';
   const bdDate = bd?.opinionDate || ((bd?.certRange || '').split(/\s+to\s+/i)[1] || '');
   const certDate = bdDate || certEnd;
@@ -588,6 +709,22 @@ export function padFromCar(car: CarData, formIn: FormInfo, leases: LeaseInfo[], 
       if (o.lease_index !== null && o.lease_index < 0) return { ...o, lease_index: base + (-o.lease_index - 1) };
       return o;
     });
+  }
+
+  // resolved acres per parcel: TMC page 1 → CAR "FINAL Resolved Acreage"
+  {
+    const num = (v: string) => ((v || '').replace(/,/g, '').match(/\d*\.?\d+/) || [''])[0];
+    const total = num(tmcAcreage?.total || '') || num(car.acresResolved);
+    const parts = tmcAcreage?.parts || [];
+    ownership = {
+      ...ownership,
+      parcels: ownership.parcels.map((p, i, all) => {
+        if ((p.resolved_acres || '').trim()) return p;
+        if (all.length === 1) return { ...p, resolved_acres: total };
+        if (parts.length === all.length) return { ...p, resolved_acres: parts[i] };
+        return p;
+      }),
+    };
   }
 
   const sum = car.curativeSummary || { land: '', mapping: '', title: '', divisionOrder: '' };

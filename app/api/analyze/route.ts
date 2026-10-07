@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { extractCore, extractCurative, extractLease, extractOwnership, type SourceTexts } from '@/lib/claude';
+import { extractCore, extractCurative, extractLease, extractOwnership, extractWells, type SourceTexts } from '@/lib/claude';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
 
-// POST { task: 'lease' | 'core' | 'curative-specific' | 'curative-other' | 'ownership', ... }
+// POST { task: 'lease' | 'core' | 'curative-specific' | 'curative-other' | 'ownership' | 'wells', ... }
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -27,6 +27,9 @@ export async function POST(req: NextRequest) {
       case 'ownership':
         if (!sources?.opinion) return NextResponse.json({ error: 'No title opinion text' }, { status: 400 });
         return NextResponse.json({ result: await extractOwnership(sources) });
+      case 'wells':
+        if (!sources?.opinion) return NextResponse.json({ error: 'No title opinion text' }, { status: 400 });
+        return NextResponse.json({ result: await extractWells(sources) });
       default:
         return NextResponse.json({ error: `Unknown task ${task}` }, { status: 400 });
     }

@@ -42,6 +42,11 @@ export interface CurativeSection {
   items: CurativeItem[];
 }
 
+export interface CurativeBlock {
+  heading: string;              // "6/25/2026 Bowles Rice - " (one block per title opinion, oldest first)
+  sections: CurativeSection[];
+}
+
 export interface CarData {
   qls: string;
   tmp: string;
@@ -74,8 +79,11 @@ export interface CarData {
   delinquent: Row[];   // 4 cols
   contracts: { agreementNumber: string; name: string; stillValid: string; wellsDrilled: string; restrictions: string };
 
-  curativeHeading: string; // "6/25/2026 Bowles Rice - "
-  curativeSections: CurativeSection[];
+  curativeBlocks: CurativeBlock[];   // one "Title Defects and Analysis" table per title opinion, oldest → newest
+  /** @deprecated kept so sessions saved before multi-opinion support still load */
+  curativeHeading?: string;
+  /** @deprecated */
+  curativeSections?: CurativeSection[];
   miscNotes: string;
 
   analysisDate: string;
@@ -127,6 +135,7 @@ export interface LeaseInfo {
   lessors: string;
   lessee: string;
   agreement_number: string;
+  agreement_number_alt?: string;    // other number found (e.g. QLA # printed in the lease) — used if the first is the title QLS
   effective_date: string;
   recording: string;
   recorded_date: string;
@@ -191,6 +200,7 @@ export interface OwnershipExtract {
   owners: OwnerExtract[];
   title_notes: string;
   record_leases?: RecordLease[];
+  bringdown_changes?: string;   // ownership changes applied from the internal bringdown (shown to the reviewer)
 }
 
 export interface CuratorItemExtract {
@@ -208,7 +218,16 @@ export interface CurativeExtract {
   misc_notes?: string;
 }
 
+export interface OpinionExtract {
+  law_firm: string;
+  cert_start: string;
+  cert_end: string;
+  opinion_date: string;
+}
+
 export interface CoreExtract {
+  opinions?: OpinionExtract[];  // every title opinion, oldest → newest (single-opinion fields below = newest)
+  misc_notes?: string;          // Miscellaneous section of the opinion(s), "None" if empty
   qls: string;
   tmps: string[];
   township: string;

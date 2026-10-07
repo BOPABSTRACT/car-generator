@@ -2,7 +2,7 @@
 // Used by the "Pad Summary from an existing CAR" option. No AI involved — the CAR is already structured.
 
 import JSZip from 'jszip';
-import type { CarData, CarOwnerRow, CurativeSection, OpinionRow, ParcelOwnership, Row } from './types';
+import type { CarData, CarOwnerRow, CurativeBlock, CurativeSection, OpinionRow, ParcelOwnership, Row } from './types';
 import { parseXml, findTables, rows, cells, textOf, norm, all } from './docx-xml';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -73,7 +73,8 @@ export async function parseCarDocx(buf: Buffer | ArrayBuffer): Promise<CarData> 
   // ---------- curative summary ----------
   const summaryVal = (label: string) => {
     const t = first(body, label);
-    return t && rows(t)[1] ? cellText(cells(rows(t)[1])[0]) : '';
+    // one cloud per row (older CARs: several clouds in one row)
+    return t ? rows(t).slice(1).map((r: El) => cellText(cells(r)[0])).filter(Boolean).join('\n') : '';
   };
 
   // ---------- ownership tables ----------
@@ -93,18 +94,15 @@ export async function parseCarDocx(buf: Buffer | ArrayBuffer): Promise<CarData> 
     rows: dataRows(t, 2).map((r) => ({ owner: r[0] || '', wi: r[1] || '', nri: r[2] || '', orri: r[3] || '' })),
   }));
 
-  // ---------- curative items ----------
-  // innermost table whose first row mentions "Title Defects and Analysis" (heading may be prefixed with date/firm)
-  const curT = findTables(body, '').find((t: El) => {
+  // ---------- curative items: one "Title Defects and Analysis" table per title opinion ----------
+  const curTables = findTables(body, '').filter((t: El) => {
     const r0 = rows(t)[0];
     return r0 && all(r0, 'w:tbl').length === 0 && norm(textOf(r0)).includes('title defects and analysis');
-  }) || null;
-  let curativeHeading = '';
-  const curativeSections: CurativeSection[] = [];
-  if (curT) {
+  });
+  const curativeBlocks: CurativeBlock[] = curTables.map((curT: El) => {
     const head = textOf(rows(curT)[0]);
     const idx = head.toLowerCase().indexOf('title defects');
-    curativeHeading = idx > 0 ? head.slice(0, idx) : '';
+    const sections: CurativeSection[] = [];
     let sec: CurativeSection | null = null;
     for (const tr of rows(curT).slice(2)) {
       const cs = cells(tr);
@@ -114,13 +112,14 @@ export async function parseCarDocx(buf: Buffer | ArrayBuffer): Promise<CarData> 
       const isHeading = t0 && !t1 && t0.length < 70 && t0 === t0.toUpperCase();
       if (isHeading) {
         sec = { title: t0.replace(/\s+/g, ' '), items: [] };
-        curativeSections.push(sec);
+        sections.push(sec);
         continue;
       }
-      if (!sec) { sec = { title: 'SPECIFIC CURATIVE ACTION ITEMS', items: [] }; curativeSections.push(sec); }
+      if (!sec) { sec = { title: 'SPECIFIC CURATIVE ACTION ITEMS', items: [] }; sections.push(sec); }
       sec.items.push({ defect: t0, recommendation: t1 });
     }
-  }
+    return { heading: idx > 0 ? head.slice(0, idx) : '', sections };
+  });
 
   // ---------- misc tables ----------
   const wellT = first(body, 'Well History');
@@ -160,8 +159,7 @@ export async function parseCarDocx(buf: Buffer | ArrayBuffer): Promise<CarData> 
     unassessed: [],
     delinquent: [],
     contracts: { agreementNumber: '', name: '', stillValid: '', wellsDrilled: '', restrictions: '' },
-    curativeHeading,
-    curativeSections,
+    curativeBlocks: curativeBlocks.length ? curativeBlocks : [{ heading: '', sections: [] }],
     miscNotes: misc && rows(misc)[1] ? cellText(cells(rows(misc)[1])[0]) : '',
     analysisDate: (reviewCells[1] || '').replace(/\[DATE\]/i, '').trim(),
     analyst: reviewCells[3] || '',
