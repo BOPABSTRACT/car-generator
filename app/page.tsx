@@ -16,6 +16,8 @@ import type {
 import { Field, Section, RowsTable, ObjTable, StepList, type Step, type StepStatus } from './ui';
 
 const LOGO = 'https://i.imgur.com/szjzoxt.png';
+/** specific curative items are read in two parts (1–SPLIT and SPLIT+1 onward) so long opinions stay under the time limit */
+const SPLIT = 8;
 
 const OWNER_COLS = [
   { key: 'owner', label: 'Owner', wide: true }, { key: 'execRights', label: 'Exec Rights Ownership' },
@@ -256,7 +258,8 @@ export default function Home() {
       { id: 'wells', label: 'Wells — title opinion(s)', status: 'pending' },
       { id: 'wells-ab', label: 'Wells — abstract', status: abstractFile ? 'pending' : 'skipped' },
       ...opinionFiles.flatMap((_, i) => [
-        { id: `cur1-${i}`, label: `Specific curative items — opinion ${i + 1}`, status: 'pending' as StepStatus },
+        { id: `cur1a-${i}`, label: `Specific curative items 1–${SPLIT} — opinion ${i + 1}`, status: 'pending' as StepStatus },
+        { id: `cur1b-${i}`, label: `Specific curative items ${SPLIT + 1}+ — opinion ${i + 1}`, status: 'pending' as StepStatus },
         { id: `cur2-${i}`, label: `General / non-action items, comments & limitations — opinion ${i + 1}`, status: 'pending' as StepStatus },
       ]),
       { id: 'own', label: 'Owners by parcel — newest opinion + bringdown changes', status: 'pending' },
@@ -288,10 +291,10 @@ export default function Home() {
       // 3. CAR + Pad analysis (parallel)
       showStatus('Building the CAR and Pad Summary (this usually takes 2–4 minutes)…', 'info');
       const base = { opinions, tmc, bringdown, abstract, leases, reviewDate };
-      const run = async <T,>(id: string, task: string, sources: object): Promise<T> => {
+      const run = async <T,>(id: string, task: string, sources: object, extra: object = {}): Promise<T> => {
         stepSet(id, 'running', 'analyzing…');
         try {
-          const { result } = await postJson<{ result: T }>('/api/analyze', { task, sources });
+          const { result } = await postJson<{ result: T }>('/api/analyze', { task, sources, ...extra });
           stepSet(id, 'done', '');
           return result;
         } catch (e) {
@@ -308,7 +311,8 @@ export default function Home() {
       const curP = opinions.map((op, i) => {
         const src = { ...base, opinions: undefined, opinion: op.text, newerOpinion: i < opinions.length - 1 ? newest.text : undefined };
         return Promise.allSettled([
-          run<CurativeExtract>(`cur1-${i}`, 'curative-specific', src),
+          run<CurativeExtract>(`cur1a-${i}`, 'curative-specific', src, { range: { from: 1, to: SPLIT } }),
+          run<CurativeExtract>(`cur1b-${i}`, 'curative-specific', src, { range: { from: SPLIT + 1, to: null } }),
           run<CurativeExtract>(`cur2-${i}`, 'curative-other', src),
         ]);
       });
@@ -325,10 +329,11 @@ export default function Home() {
       const curativeByOpinion = opinions.map((op, i) => {
         const pair = curR[i].status === 'fulfilled' ? (curR[i] as PromiseFulfilledResult<PromiseSettledResult<CurativeExtract>[]>).value : [];
         const c1 = pair[0]?.status === 'fulfilled' ? pair[0].value : null;
-        const c2 = pair[1]?.status === 'fulfilled' ? pair[1].value : null;
-        const items: CuratorItemExtract[] = mergeCurative(c1?.items || [], c2?.items || []);
+        const c1b = pair[1]?.status === 'fulfilled' ? pair[1].value : null;
+        const c2 = pair[2]?.status === 'fulfilled' ? pair[2].value : null;
+        const items: CuratorItemExtract[] = mergeCurative([...(c1?.items || []), ...(c1b?.items || [])], c2?.items || []);
         const fallbackHeading = core.opinions?.[i] ? `${core.opinions[i].opinion_date} ${core.opinions[i].law_firm} - ` : (op.date ? `${op.date} - ` : '');
-        return { heading: c1?.heading || c2?.heading || fallbackHeading, items };
+        return { heading: c1?.heading || c1b?.heading || c2?.heading || fallbackHeading, items };
       });
 
       const built = assemble({
@@ -356,7 +361,7 @@ export default function Home() {
       ].filter((n) => n && n.trim());
       setReviewNotes(notes);
       const failed = [wellsR, wellsAbR, chainR, ownR].filter((x) => x.status === 'rejected').length
-        + curR.reduce((n, r) => n + (r.status === 'fulfilled' ? (r.value as PromiseSettledResult<unknown>[]).filter((x) => x.status === 'rejected').length : 2), 0);
+        + curR.reduce((n, r) => n + (r.status === 'fulfilled' ? (r.value as PromiseSettledResult<unknown>[]).filter((x) => x.status === 'rejected').length : 3), 0);
       showStatus(failed
         ? `Done with ${failed} step(s) failing — those sections are empty. Review below, fill gaps, then export.`
         : 'Done. Review and edit everything below (red text in the CAR = analyst entries), then export.', failed ? 'info' : 'success');

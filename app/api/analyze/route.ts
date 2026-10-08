@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { extractChain, extractCore, extractCurative, extractLease, extractOwnership, extractWells, type SourceTexts } from '@/lib/claude';
 
 export const runtime = 'nodejs';
-export const maxDuration = 300;
+// Vercel Pro allows up to 800s (Hobby is capped at 300s)
+export const maxDuration = 800;
 
 // POST { task: 'lease' | 'core' | 'curative-specific' | 'curative-other' | 'ownership' | 'wells' | 'wells-abstract' | 'chain', ... }
 export async function POST(req: NextRequest) {
@@ -23,7 +24,7 @@ export async function POST(req: NextRequest) {
       case 'curative-specific':
       case 'curative-other':
         if (!sources?.opinion) return NextResponse.json({ error: 'No title opinion text' }, { status: 400 });
-        return NextResponse.json({ result: await extractCurative(sources, task === 'curative-specific' ? 'specific' : 'other') });
+        return NextResponse.json({ result: await extractCurative(sources, task === 'curative-specific' ? 'specific' : 'other', body.range) });
       case 'ownership':
         if (!sources?.opinion) return NextResponse.json({ error: 'No title opinion text' }, { status: 400 });
         return NextResponse.json({ result: await extractOwnership(sources) });

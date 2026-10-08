@@ -278,9 +278,15 @@ CNX ANALYST CONVENTIONS (follow these closely):
 - NON-ACTION CURATIVE ITEMS: return EACH numbered non-action item ("1.", "2.", "3." ...) as its OWN item — never combine them. Only COMMENTS AND LIMITATIONS is combined into one item.
 - INTERNAL BRINGDOWN ITEMS: only if the internal bringdown shows conveyances, leases, easements or encumbrances recorded after the opinion's certification date that are NOT already addressed by an opinion item (a mortgage satisfaction is addressed under the mortgage item instead). Defect = description from the bringdown; give a recommendation.`;
 
-export async function extractCurative(s: SourceTexts, part: 'specific' | 'other'): Promise<CurativeExtract> {
+/** Specific items are split into parts (by position in the opinion) so long opinions finish inside the server time limit. */
+export interface CurativeRange { from: number; to: number | null }
+
+export async function extractCurative(s: SourceTexts, part: 'specific' | 'other', range?: CurativeRange): Promise<CurativeExtract> {
+  const rangeText = range
+    ? ` Only return the ${range.to ? `${ordinal(range.from)} through ${ordinal(range.to)}` : `${ordinal(range.from)} and later`} specific items, counting the opinion's specific curative items / requirements in the order they appear (1 = the first one, whatever its label — Arabic, Roman numeral or letter). Another pass handles the others${range.from === 1 ? '' : ', and another pass handles INTERNAL BRINGDOWN ITEMS — do not include them'}. If there are fewer than ${range.from} specific items, return an empty list.`
+    : '';
   const scope = part === 'specific'
-    ? 'Return ONLY the SPECIFIC curative action items / title requirements (the tract-specific requirements), plus any INTERNAL BRINGDOWN ITEMS. Do NOT include general items, non-action items or comments/limitations — another pass handles those. Each opinion item appears exactly once.'
+    ? `Return ONLY the SPECIFIC curative action items / title requirements (the tract-specific requirements)${!range || range.from === 1 ? ', plus any INTERNAL BRINGDOWN ITEMS' : ''}. Do NOT include general items, non-action items or comments/limitations — another pass handles those. Each opinion item appears exactly once.${rangeText}`
     : 'Return ONLY the GENERAL curative action items, the NON-ACTION curative items, and the COMMENTS AND LIMITATIONS — and only items the opinion itself prints under such a heading. Do NOT include specific / tract requirements, even rephrased, and never copy a specific item into these sections. If the opinion has no general or non-action section, return no items for it (an empty list is correct). Each opinion item appears exactly once — never repeat an item. Set "misc_notes" to "None" (the Miscellaneous section is handled by another pass).';
   const context = s.newerOpinion
     ? '\nNOTE: a NEWER title opinion is included only as context (<newer_title_opinion_for_context_only>). List items ONLY from <title_opinion>; you may use the newer opinion when writing the recommendation (e.g. an item cured or superseded by the newer opinion).\n'
@@ -295,6 +301,12 @@ ${CURATIVE_RULES}
 
 ${allSources(s, part === 'specific')}`;
   return runJson<CurativeExtract>(prompt, MAX);
+}
+
+function ordinal(n: number): string {
+  const s = ['th', 'st', 'nd', 'rd'];
+  const v = n % 100;
+  return `${n}${s[(v - 20) % 10] || s[v] || s[0]}`;
 }
 
 // ---------------------------------------------------------------------------

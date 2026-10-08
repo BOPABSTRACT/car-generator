@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { transcribePages } from '@/lib/claude';
 
 export const runtime = 'nodejs';
-export const maxDuration = 300;
+// Vercel Pro allows up to 800s (Hobby is capped at 300s)
+export const maxDuration = 800;
 
 // POST { filename, images: [{ page, data(base64 jpeg) }] } — Claude reads scanned / handwritten pages.
 export async function POST(req: NextRequest) {
