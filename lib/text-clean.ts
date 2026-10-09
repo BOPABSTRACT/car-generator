@@ -161,3 +161,27 @@ export function pagesNeedingVision(pages: string[], maxGoodChars = 15000): numbe
   if (goodChars >= maxGoodChars) return [];
   return flagged.length / pages.length >= 0.3 ? flagged : [];
 }
+
+const OWN_RE = /\b(ownership report|current owner|run ?sheet|chain of title|vesting|grantor|grantee|deed book|record book|lease book|assignment|adverse|outsale|conveyance|tax (ticket|map|parcel)|assessment)\b/i;
+
+/**
+ * Abstract text for building a CAR WITHOUT the title opinion: cover pages, well pages and ownership / run-sheet /
+ * adverse pages first, then the remaining text pages, up to maxChars. Pages are returned in their original order.
+ */
+export function abstractFull(pages: string[], maxChars = 200000, extra: number[] = []): string {
+  const keep = new Set(extra);
+  const usable = pages.map((t, i) => ({ t: t.trim(), i })).filter((p) => p.t.length >= 60 || keep.has(p.i));
+  const rank = (p: { t: string; i: number }) => (p.i < 4 || keep.has(p.i) ? 0 : WELL_RE.test(p.t) || OWN_RE.test(p.t) ? 1 : 2);
+  const chosen: { t: string; i: number }[] = [];
+  let total = 0;
+  for (const r of [0, 1, 2]) {
+    for (const p of usable) {
+      if (rank(p) !== r) continue;
+      const len = p.t.length + 20;
+      if (total + len > maxChars) continue;
+      chosen.push(p);
+      total += len;
+    }
+  }
+  return chosen.sort((a, b) => a.i - b.i).map((p) => `[Page ${p.i + 1}]\n${p.t}`).join('\n\n');
+}

@@ -1,10 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import { splitPastedClouds } from '@/lib/cloud-split';
 import { pdfPages, pdfPageImages } from '@/lib/pdf-text';
 import {
   stripRunningHeaders, joinPages, abstractExcerpt, pagesNeedingVision, tmcResolvedAcreage, opinionDateFromText,
-  wellSectionScannedPages,
+  wellSectionScannedPages, abstractFull,
 } from '@/lib/text-clean';
 import type { OpinionText } from '@/lib/claude';
 import { assemble, mergeCurative, normalizeCar, padFromCar } from '@/lib/assemble';
@@ -35,6 +36,12 @@ const blankOwner = (): CarOwnerRow => ({
   owner: '', execRights: '', royaltyOwnership: '', controlType: '', agreementQls: '', recording: '', royalty: '',
   poolingLimit: '', pugh: '', expiration: '', heldBy: '', formations: '',
 });
+
+type Mode = 'choose' | 'car' | 'pad' | 'car-manual';
+
+/** Title-opinion facts typed in by the analyst ("without the title opinion" mode) */
+interface ManualOpinion { qls: string; lawFirm: string; certStart: string; certEnd: string; opinionDate: string; estates: string; acresTitle: string }
+const emptyManual: ManualOpinion = { qls: '', lawFirm: '', certStart: '', certEnd: '', opinionDate: '', estates: '', acresTitle: '' };
 
 const emptyForm: FormInfo = {
   analyst: '', analystInitials: '', reviewDate: '', tractNumbers: '', unitName: '', unitTwpCountyState: '', totalUnitAcres: '',
@@ -70,7 +77,11 @@ export default function Home() {
   const [passwordInput, setPasswordInput] = useState('');
   const [passwordError, setPasswordError] = useState(false);
 
-  const [mode, setMode] = useState<'choose' | 'car' | 'pad'>('choose');
+  const [mode, setMode] = useState<Mode>('choose');
+  const [manualOp, setManualOp] = useState<ManualOpinion>({ ...emptyManual });
+  const [pastedClouds, setPastedClouds] = useState('');
+  const cloudPreview = useMemo(() => splitPastedClouds(pastedClouds), [pastedClouds]);
+  const setM = (k: keyof ManualOpinion) => (v: string) => setManualOp((m) => ({ ...m, [k]: v }));
   const [form, setForm] = useState<FormInfo>({ ...emptyForm });
   const [carDocFile, setCarDocFile] = useState<File | null>(null);
   const [opinionFiles, setOpinionFiles] = useState<File[]>([]);
@@ -140,10 +151,10 @@ export default function Home() {
   }
 
   /** Text of a PDF. Scanned or handwritten pages (no usable text layer) are read from the page image by Claude. */
-  async function readPdf(file: File, id: string, mode: 'full' | 'abstract'): Promise<string> {
+  async function readPdf(file: File, id: string, mode: 'full' | 'abstract' | 'abstract-full'): Promise<string> {
     stepSet(id, 'running', 'reading text…');
     const pages = await pdfPages(file, (d, t) => stepSet(id, 'running', `page ${d} of ${t}`));
-    if (mode === 'abstract') {
+    if (mode === 'abstract' || mode === 'abstract-full') {
       // a well section that is only a scanned image (e.g. Daxton Irving "Well Information") is read from the page image
       const wellPages = wellSectionScannedPages(pages);
       if (wellPages.length) {
@@ -153,7 +164,9 @@ export default function Home() {
           read.forEach((t, i) => { pages[i] = t; });
         } catch { /* well pages are optional */ }
       }
-      const text = abstractExcerpt(stripRunningHeaders(pages), 150000, wellPages);
+      const text = mode === 'abstract-full'
+        ? abstractFull(stripRunningHeaders(pages), 200000, wellPages)
+        : abstractExcerpt(stripRunningHeaders(pages), 150000, wellPages);
       stepSet(id, 'done', text
         ? `${pages.length} pages, ${Math.round(text.length / 1000)}k chars used${wellPages.length ? ` (${wellPages.length} well page(s) read from images)` : ''}`
         : 'scanned — skipped (abstract is optional)');
@@ -372,6 +385,130 @@ export default function Home() {
     }
   }
 
+  // ---------------- New CAR WITHOUT the title opinion ----------------
+  // The opinion is never uploaded. Clouds pasted by the analyst are split in the browser (no AI);
+  // TMC, bringdowns, abstract and leases are analyzed as usual.
+  async function generateManual() {
+    if (!abstractFile && !leaseFiles.length && !tmcFile) { showStatus('Upload at least the abstract, TMC or leases', 'error'); return; }
+    const reviewDate = /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(form.reviewDate.trim()) ? form.reviewDate.trim() : todayMDY();
+    const f: FormInfo = { ...form, reviewDate };
+    setForm(f);
+    const initial: Step[] = [
+      { id: 'clouds', label: 'Pasted curative items — split in your browser (not sent to AI)', status: pastedClouds.trim() ? 'pending' : 'skipped' },
+      { id: 'tmc', label: tmcFile ? `Title Mapping Curative — ${tmcFile.name}` : 'Title Mapping Curative (not provided)', status: tmcFile ? 'pending' : 'skipped' },
+      ...(bringdownFiles.length
+        ? bringdownFiles.map((bf, i) => ({ id: `bringdown-${i}`, label: `Bringdown — ${bf.name}`, status: 'pending' as StepStatus }))
+        : [{ id: 'bringdown-none', label: 'Bringdown (not provided)', status: 'skipped' as StepStatus }]),
+      { id: 'abstract', label: abstractFile ? `Abstract — ${abstractFile.name}` : 'Abstract (not provided)', status: abstractFile ? 'pending' : 'skipped' },
+      ...leaseFiles.map((lf, i) => ({ id: `lease-${i}`, label: `Lease — ${lf.name}`, status: 'pending' as StepStatus })),
+      { id: 'core', label: 'Header, leasehold, outsales, encumbrances — from abstract, TMC, bringdown, leases', status: 'pending' },
+      { id: 'chain', label: 'Leasehold chain — from abstract run sheet + bringdown', status: abstractFile || bringdownFiles.length ? 'pending' : 'skipped' },
+      { id: 'wells-ab', label: 'Wells — abstract', status: abstractFile ? 'pending' : 'skipped' },
+      { id: 'own', label: 'Owners by parcel — from abstract, bringdown, leases (verify against opinion)', status: 'pending' },
+    ];
+    setSteps(initial);
+    setIsProcessing(true);
+    setCar(null);
+    setPad(null);
+    setReviewNotes([]);
+    showStatus('Reading documents in your browser…', 'info');
+    try {
+      const split = splitPastedClouds(pastedClouds);
+      if (pastedClouds.trim()) {
+        const c = split.counts;
+        stepSet('clouds', 'done', `${split.items.length} item(s): ${c.specific} specific, ${c.general} general, ${c.nonAction} non-action${c.comments ? ', comments & limitations' : ''}`);
+      }
+      const [tmc, bdRead, abstract] = await Promise.all([
+        tmcFile ? readPdf(tmcFile, 'tmc', 'full').catch((e) => { stepSet('tmc', 'error', e.message); return ''; }) : Promise.resolve(''),
+        bringdownFiles.length ? readBringdowns(bringdownFiles) : Promise.resolve({ text: '', order: [] as string[] }),
+        abstractFile ? readPdf(abstractFile, 'abstract', 'abstract-full').catch((e) => { stepSet('abstract', 'error', e.message); return ''; }) : Promise.resolve(''),
+      ]);
+      const bringdown = bdRead.text;
+      const tmcAcreage = tmcResolvedAcreage(tmc);
+      if (tmcFile) stepSet('tmc', 'done', tmcAcreage ? `resolved acreage ${tmcAcreage.total}` : 'resolved acreage line not found — check the CAR');
+
+      showStatus('Analyzing leases…', 'info');
+      const leases = await readLeases(reviewDate);
+
+      showStatus('Building the CAR and Pad Summary (this usually takes 2–4 minutes)…', 'info');
+      const fileQls = [tmcFile, abstractFile, ...bringdownFiles, ...leaseFiles].map((x) => x?.name.match(/\b(\d{6})-?(\d{3})\b/)).find(Boolean);
+      const titleQls = manualOp.qls.trim() || (fileQls ? `${fileQls[1]}-${fileQls[2]}` : '');
+      const base = { opinion: '', noOpinion: true, tmc, bringdown, abstract, leases, reviewDate, titleQls };
+      const run = async <T,>(id: string, task: string, sources: object): Promise<T> => {
+        stepSet(id, 'running', 'analyzing…');
+        try {
+          const { result } = await postJson<{ result: T }>('/api/analyze', { task, sources });
+          stepSet(id, 'done', '');
+          return result;
+        } catch (e) {
+          stepSet(id, 'error', e instanceof Error ? e.message : String(e));
+          throw e;
+        }
+      };
+      const coreP = run<CoreExtract>('core', 'core', base);
+      const chainP = abstract || bringdown ? run<ChainExtract>('chain', 'chain', { ...base, tmc: '' }) : Promise.resolve(null);
+      const wellsAbP = abstract
+        ? run<{ wells: string[][]; notes: string }>('wells-ab', 'wells-abstract', { ...base, tmc: '', bringdown: '', leases: [] })
+        : Promise.resolve({ wells: [], notes: '' });
+      const ownP = run<OwnershipExtract>('own', 'ownership', base);
+      const [coreR, chainR, wellsAbR, ownR] = await Promise.allSettled([coreP, chainP, wellsAbP, ownP]);
+      const core = coreR.status === 'fulfilled' ? coreR.value : null;
+      if (!core) throw new Error('The header/leasehold step failed — see the error above and try again.');
+      const chain = chainR.status === 'fulfilled' ? chainR.value : null;
+      const wellsAb = wellsAbR.status === 'fulfilled' ? wellsAbR.value : null;
+      const own = ownR.status === 'fulfilled' ? ownR.value : null;
+
+      // the analyst's typed opinion facts win over anything the AI found
+      const m = manualOp;
+      const qls = m.qls.trim() || core.qls || (fileQls ? `${fileQls[1]}-${fileQls[2]}` : '');
+      const coreM: CoreExtract = {
+        ...core,
+        qls,
+        law_firm: m.lawFirm.trim(), cert_start: m.certStart.trim(), cert_end: m.certEnd.trim(), opinion_date: m.opinionDate.trim(),
+        opinions: [{ law_firm: m.lawFirm.trim(), cert_start: m.certStart.trim(), cert_end: m.certEnd.trim(), opinion_date: m.opinionDate.trim() }],
+        estates: m.estates.trim() || '',
+        acres_title: m.acresTitle.trim() || core.acres_title || '',
+        misc_notes: '',
+      };
+      if (m.acresTitle.trim() && coreM.tract_description) {
+        coreM.tract_description = coreM.tract_description.replace(/containing .*$/i, `containing ${m.acresTitle.trim()}`);
+      }
+      const heading = [m.opinionDate.trim(), m.lawFirm.trim()].filter(Boolean).join(' ');
+      const built = assemble({
+        form: f,
+        core: coreM,
+        curativeByOpinion: [{ heading: heading ? `${heading} - ` : '', items: split.items }],
+        ownership: own || { parcels: [], owners: [], title_notes: '' },
+        leases,
+        wells: wellsAb?.wells || [],
+        chain,
+        tmcAcreage,
+      });
+      setCar(built.car);
+      setPad(built.pad);
+      const notes = [
+        'Built WITHOUT the title opinion. Enter or verify against the opinion: header (law firm, cert dates, opinion date, estates, title acres), Curative Summary (page 1), CNX recommendations for the specific curative items, ownership fractions, assignment chain, liens, and the Miscellaneous section.',
+        pastedClouds.trim() ? `Curative items were split from the pasted text — check that each cloud starts and ends in the right place (${split.items.length} found).` : 'No curative items were pasted — add them on the review screen under "Curative Items and Recommendations".',
+        own?.bringdown_changes ? `Ownership changed per bringdown: ${own.bringdown_changes}` : '',
+        tmcFile && !tmcAcreage ? 'Could not find the "Resolved Mapping Acreage" line on the TMC — check FINAL Resolved Acreage.' : '',
+        bdRead.order.length > 1 ? `Bringdowns ordered oldest → newest: ${bdRead.order.join(', ')} — check the order on the CAR header.` : '',
+        wellsAb?.notes ? `Wells (abstract): ${wellsAb.notes}` : '',
+        chain?.notes ? `Assignment chain: ${chain.notes}` : '',
+        core.notes_for_reviewer,
+        ...leases.map((l) => (l.notes_for_reviewer ? `${l.source_file}: ${l.notes_for_reviewer}` : '')),
+      ].filter((n) => n && n.trim());
+      setReviewNotes(notes);
+      const failed = [chainR, wellsAbR, ownR].filter((x) => x.status === 'rejected').length;
+      showStatus(failed
+        ? `Done with ${failed} step(s) failing — those sections are empty. Fill the title-opinion sections by hand, then export.`
+        : 'Done. Fill in the title-opinion sections by hand (see notes), review everything, then export.', 'info');
+    } catch (e) {
+      showStatus(`Failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
+    } finally {
+      setIsProcessing(false);
+    }
+  }
+
   // ---------------- Pad Summary from an existing CAR ----------------
   async function generatePad() {
     if (!carDocFile) { showStatus('Please upload the completed CAR (.docx)', 'error'); return; }
@@ -445,7 +582,7 @@ export default function Home() {
     }
   }
 
-  function startOver(next: 'choose' | 'car' | 'pad') {
+  function startOver(next: Mode) {
     setMode(next);
     setSteps([]);
     setStatus(null);
@@ -487,7 +624,7 @@ export default function Home() {
     if (!file) return;
     try {
       const data = JSON.parse(await file.text());
-      if (data.mode === 'car' || data.mode === 'pad') setMode(data.mode);
+      if (data.mode === 'car' || data.mode === 'pad' || data.mode === 'car-manual') setMode(data.mode);
       if (data.form) setForm({ ...emptyForm, ...data.form });
       if (data.car) setCar(normalizeCar(data.car));
       if (data.pad) setPad(data.pad);
@@ -530,6 +667,10 @@ export default function Home() {
             <span className="mode-title">{'Create a new CAR'}</span>
             <span className="mode-desc">{'Build the Curative Action Report and the Pad Summary rows from the title opinion, TMC, bringdown, abstract and leases.'}</span>
           </button>
+          <button className="mode-card" onClick={() => startOver('car-manual')}>
+            <span className="mode-title">{'New CAR — without the title opinion'}</span>
+            <span className="mode-desc">{'For clients who don’t allow title opinions to go through AI. The opinion is never uploaded: paste its curative items (split in your browser) and type the header; everything else is built from the TMC, bringdown, abstract and leases.'}</span>
+          </button>
           <button className="mode-card" onClick={() => startOver('pad')}>
             <span className="mode-title">{'Pad Summary from an existing CAR'}</span>
             <span className="mode-desc">{'Upload a completed CAR (.docx) and the leases to build only the Pad Summary Ownership and Title-Curative rows.'}</span>
@@ -547,11 +688,12 @@ export default function Home() {
 
   const done = steps.filter((s) => ['done', 'error', 'skipped'].includes(s.status)).length;
   const padOnly = mode === 'pad';
+  const manual = mode === 'car-manual';
 
   return (
     <div className="container">
       <a href="/user-guide.html" target="_blank" rel="noopener noreferrer" className="help-btn">User Guide</a>
-      <h1>{padOnly ? 'Pad Summary from an Existing CAR' : 'Create a New CAR & Pad Summary'}</h1>
+      <h1>{padOnly ? 'Pad Summary from an Existing CAR' : manual ? 'New CAR — Without the Title Opinion' : 'Create a New CAR & Pad Summary'}</h1>
       <div style={{ textAlign: 'center', marginTop: -18, marginBottom: 10 }}>
         <button className="btn-small" onClick={() => startOver('choose')} disabled={isProcessing}>{'← Back to start'}</button>
       </div>
@@ -602,7 +744,63 @@ export default function Home() {
             </label>
           </div>
         </>
-      ) : (<>
+      ) : manual ? (<>
+      <div className="status info" style={{ marginTop: 0 }}>
+        {'The title opinion is not uploaded and nothing from it is sent to AI. Type the opinion header below and paste the curative section — it is split into items here in your browser.'}
+      </div>
+      <h3 style={{ marginBottom: 6 }}>{'Title opinion header (typed by the analyst)'}</h3>
+      <div className="grid-3">
+        <Field label="Title Opinion QLS #" value={manualOp.qls} onChange={setM('qls')} placeholder="e.g., 296808-000" />
+        <Field label="Law Firm" value={manualOp.lawFirm} onChange={setM('lawFirm')} placeholder="e.g., Bowles Rice" />
+        <Field label="Title Opinion Date" value={manualOp.opinionDate} onChange={setM('opinionDate')} placeholder="M/D/YYYY" />
+        <Field label="Certification Start" value={manualOp.certStart} onChange={setM('certStart')} placeholder="M/D/YYYY" />
+        <Field label="Certification End" value={manualOp.certEnd} onChange={setM('certEnd')} placeholder="M/D/YYYY" />
+        <Field label="Estates Certified" value={manualOp.estates} onChange={setM('estates')} placeholder="e.g., Surface, oil and gas" />
+        <Field label="Acres per Title Opinion" value={manualOp.acresTitle} onChange={setM('acresTitle')} placeholder="e.g., 38.451 acres" />
+      </div>
+      <div className="form-group">
+        <label>{'Paste the opinion’s curative section (optional)'}</label>
+        <textarea rows={8} value={pastedClouds} onChange={(e) => setPastedClouds(e.target.value)}
+          placeholder={'Copy from the PDF everything from "SPECIFIC CURATIVE ACTION ITEMS" (or "Requirements") through "COMMENTS AND LIMITATIONS" and paste it here.'} />
+        <div className="hint">
+          {pastedClouds.trim()
+            ? `Found ${cloudPreview.items.length} item(s): ${cloudPreview.counts.specific} specific, ${cloudPreview.counts.general} general, ${cloudPreview.counts.nonAction} non-action${cloudPreview.counts.comments ? ', plus comments & limitations' : ''}. Split here in your browser — not sent anywhere. General / non-action items get "Advisory"; add the CNX recommendation for each specific item on the review screen.`
+            : 'Items are recognized by labels like "Specific Curative Action Item 1:", "1.", "I." or "A.", and by section headings.'}
+        </div>
+      </div>
+      <h3 style={{ marginBottom: 6 }}>{'Other documents (analyzed with AI as usual)'}</h3>
+      <div className="grid-2">
+        <div className="form-group">
+          <label>{'Title Mapping Curative (PDF)'}</label>
+          <input type="file" accept=".pdf" onChange={(e) => setTmcFile(e.target.files?.[0] || null)} />
+          <div className="hint">{'Resolved acreage, outsales and survey clouds.'}</div>
+        </div>
+        <div className="form-group">
+          <label>{'Internal Bringdown(s) (DOC, DOCX or PDF)'}</label>
+          <input type="file" accept=".doc,.docx,.pdf" multiple onChange={(e) => setBringdownFiles(Array.from(e.target.files || []))} />
+          <div className="hint">{'Select all bringdowns at once — ordered oldest → newest by the date in the file name.'}</div>
+        </div>
+        <div className="form-group">
+          <label>{'Abstract of Title (PDF) — recommended'}</label>
+          <input type="file" accept=".pdf" onChange={(e) => setAbstractFile(e.target.files?.[0] || null)} />
+          <div className="hint">{'Stands in for the opinion: ownership report, run sheet, assignments, taxes and wells.'}</div>
+        </div>
+        <div className="form-group">
+          <label>{'Long Form Lease(s) (PDF, one file per lease)'}</label>
+          <input type="file" accept=".pdf" multiple onChange={(e) => setLeaseFiles(Array.from(e.target.files || []))} />
+          <div className="hint">{'Lease terms for the ownership / WI tables and the Pad Summary.'}</div>
+        </div>
+      </div>
+      <div className="button-group">
+        <button className="btn-real" onClick={generateManual} disabled={isProcessing}>
+          {isProcessing ? 'Processing…' : 'Generate CAR & Pad Summary'}
+        </button>
+        <label className="btn-load">
+          {'Load saved session'}
+          <input type="file" accept=".json" style={{ display: 'none' }} onChange={(e) => loadSession(e.target.files?.[0])} />
+        </label>
+      </div>
+      </>) : (<>
       <div className="grid-2">
         <div className="form-group">
           <label>{'Title Opinion (PDF) *'}</label>

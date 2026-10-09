@@ -19,14 +19,14 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ result: await extractLease(text, filename || 'lease.pdf', reviewDate || '') });
       }
       case 'core':
-        if (!sources?.opinion) return NextResponse.json({ error: 'No title opinion text' }, { status: 400 });
+        if (!sources?.opinion && !sources?.noOpinion) return NextResponse.json({ error: 'No title opinion text' }, { status: 400 });
         return NextResponse.json({ result: await extractCore(sources) });
       case 'curative-specific':
       case 'curative-other':
         if (!sources?.opinion) return NextResponse.json({ error: 'No title opinion text' }, { status: 400 });
         return NextResponse.json({ result: await extractCurative(sources, task === 'curative-specific' ? 'specific' : 'other', body.range) });
       case 'ownership':
-        if (!sources?.opinion) return NextResponse.json({ error: 'No title opinion text' }, { status: 400 });
+        if (!sources?.opinion && !sources?.noOpinion) return NextResponse.json({ error: 'No title opinion text' }, { status: 400 });
         return NextResponse.json({ result: await extractOwnership(sources) });
       case 'wells':
         if (!sources?.opinion) return NextResponse.json({ error: 'No title opinion text' }, { status: 400 });
@@ -35,7 +35,7 @@ export async function POST(req: NextRequest) {
         if (!sources) return NextResponse.json({ error: 'No sources' }, { status: 400 });
         return NextResponse.json({ result: await extractWells(sources, 'abstract') });
       case 'chain':
-        if (!sources?.opinion) return NextResponse.json({ error: 'No title opinion text' }, { status: 400 });
+        if (!sources?.opinion && !sources?.noOpinion) return NextResponse.json({ error: 'No title opinion text' }, { status: 400 });
         return NextResponse.json({ result: await extractChain(sources) });
       default:
         return NextResponse.json({ error: `Unknown task ${task}` }, { status: 400 });

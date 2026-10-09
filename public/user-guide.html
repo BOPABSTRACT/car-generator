@@ -175,6 +175,7 @@
     <a href="#step5">5. Review the Pad Summary</a>
     <a href="#step6">6. Export</a>
     <a href="#padonly">Pad Summary from an Existing CAR</a>
+    <a href="#noopinion">CAR Without the Title Opinion</a>
     <h3>Reference</h3>
     <a href="#sources">Where Each Field Comes From</a>
     <a href="#conventions">Recommendation Wording</a>
@@ -252,6 +253,27 @@
       <div class="step"><div class="step-num">1</div><div class="step-body"><strong>Download CAR (.docx)</strong><p>The official NEW CAR FORM – 2023 filled in. File name: <code>QLS - CAR - M.D.YYYY.docx</code>.</p></div></div>
       <div class="step"><div class="step-num">2</div><div class="step-body"><strong>Download Pad Summary rows (.xlsx)</strong><p>Same column layout as the master Pad Summary. Copy the owner rows (row 22 down) and the Title-Curative row into the unit's Pad Summary.</p></div></div>
       <div class="step"><div class="step-num">3</div><div class="step-body"><strong>Save review session</strong><p>Saves everything you've edited to a .json file. Use "Load saved session" to pick up where you left off without re-running the AI.</p></div></div>
+    </section>
+
+    <section id="noopinion">
+      <h2>New CAR — Without the Title Opinion</h2>
+      <p>For clients who don't allow title opinions to be run through AI. The opinion is <strong>never uploaded</strong> and nothing from it is sent to the AI. The TMC, bringdown(s), abstract and leases are analyzed as usual.</p>
+      <div class="step"><div class="step-num">1</div><div class="step-body"><strong>Choose "New CAR — without the title opinion"</strong><p>On the start screen after login.</p></div></div>
+      <div class="step"><div class="step-num">2</div><div class="step-body"><strong>Type the opinion header</strong><p>QLS #, law firm, opinion date, certification start/end, estates certified and acres per the opinion. These go straight into the CAR header and the curative table heading.</p></div></div>
+      <div class="step"><div class="step-num">3</div><div class="step-body"><strong>Paste the curative section (optional)</strong><p>Open the opinion yourself, copy everything from "SPECIFIC CURATIVE ACTION ITEMS" (or "Requirements") through "COMMENTS AND LIMITATIONS", and paste it in the box. It is split into items <em>in your browser</em> using fixed text rules, not AI. The box shows how many items it found — check that the count matches the opinion.</p></div></div>
+      <div class="step"><div class="step-num">4</div><div class="step-body"><strong>Upload the other documents and Generate</strong><p>Upload the abstract if you have it — it stands in for the opinion for ownership, the assignment chain, taxes and wells.</p></div></div>
+      <table>
+        <thead><tr><th>Filled automatically</th><th>Entered / verified by the analyst</th></tr></thead>
+        <tbody>
+          <tr><td>Resolved acreage, outsales, survey clouds (TMC)</td><td>CNX recommendation for each specific curative item</td></tr>
+          <tr><td>Bringdown rows, releases, new instruments</td><td>Curative Summary on page 1</td></tr>
+          <tr><td>Wells, tax map numbers, township/county (abstract)</td><td>Ownership fractions (verify against the opinion)</td></tr>
+          <tr><td>Owner names and vesting, assignment chain (abstract run sheet)</td><td>Assignment chain, liens, Miscellaneous — check against the opinion</td></tr>
+          <tr><td>Lease terms, WI table, every Pad Summary lease column</td><td>Header fields you left blank</td></tr>
+          <tr><td>General / non-action items → "Advisory"</td><td></td></tr>
+        </tbody>
+      </table>
+      <div class="tip"><strong>Splitting rules:</strong> items start at labels like "Specific Curative Action Item 1:", or a numbered line "1.", "I." or "A." numbered in order within a section. Section headings (Specific / General / Non-Action / Requirements / Advisory Comments / Comments and Limitations) set the section. Repeated page headers and "Page N" lines are removed. If a cloud is split in the wrong place, fix it on the review screen.</div>
     </section>
 
     <section id="padonly">

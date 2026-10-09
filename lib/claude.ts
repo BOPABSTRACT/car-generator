@@ -79,7 +79,14 @@ export interface SourceTexts {
   abstract?: string;
   leases?: LeaseInfo[];
   reviewDate?: string;
+  noOpinion?: boolean;          // client does not allow the title opinion to be processed — build from the other documents
 }
+
+const NO_OPINION = `IMPORTANT: NO TITLE OPINION IS PROVIDED. The client does not allow the title opinion to be processed, so the analyst will enter the opinion's information by hand.
+- Use the abstract of title (cover sheet, ownership report, run sheet / chain of title, adverse searches, tax information, well information), the Title Mapping Curative, the internal bringdown(s) and the lease summaries instead.
+- Never guess anything that only a title opinion would state. Leave these EMPTY ("" or []): opinions, law_firm, cert_start, cert_end, opinion_date, estates, misc_notes, heirship_name, additional_product_needed.
+- "qls" may come from document names/headers (e.g. "QLS # 296808" on the abstract → "296808-000").
+- Mention in notes_for_reviewer that values must be verified against the title opinion.`;
 
 function leaseSummary(leases: LeaseInfo[] | undefined): string {
   if (!leases || !leases.length) return '(no lease documents were provided)';
@@ -101,6 +108,7 @@ function leaseSummary(leases: LeaseInfo[] | undefined): string {
 }
 
 function opinionBlocks(s: SourceTexts, useAll: boolean): string {
+  if (s.noOpinion) return '<title_opinion>\n(NOT PROVIDED — see the note above)\n</title_opinion>';
   const ops = useAll && s.opinions && s.opinions.length > 1 ? s.opinions : null;
   if (!ops) {
     return [
@@ -207,7 +215,7 @@ ${text}
 // ---------------------------------------------------------------------------
 export async function extractCore(s: SourceTexts): Promise<CoreExtract> {
   const prompt = `Build the data for the CNX Curative Action Report (CAR) from the documents below. Analyst review date: ${s.reviewDate || 'today'}.
-
+${s.noOpinion ? `\n${NO_OPINION}\n` : ''}
 SOURCE PRIORITY: the title opinion(s) are the primary source. When there is more than one title opinion, the NEWEST one controls current ownership, leasehold and tract data; older ones are listed in "opinions" and still count for outsales and encumbrances. Use the Title Mapping Curative (TMC) for resolved acreage, outsales and survey matters. Use the internal bringdown(s) for anything recorded after the newest opinion's certification date (new conveyances, leases, mortgage satisfactions). There may be more than one bringdown, oldest → newest; the newest controls. Use the lease summaries for lease terms.
 If the TMC contains more than one version (e.g. an original and a "(Revised)" TMC), use the most recent / revised version.
 
@@ -242,7 +250,7 @@ Return ONE JSON object with these fields (strings unless noted). TABLES MUST BE 
 - misc_notes: the contents of the opinion's MISCELLANEOUS section (e.g. "VIII. MISCELLANEOUS"), copied verbatim. If there are several opinions with non-empty Miscellaneous sections, give each on its own paragraph starting "<opinion date> <law firm>: ". Use "None" if the section is empty, says "None of Record", or doesn't exist.
 - notes_for_reviewer: anything the analyst should double-check ("" if none)
 
-${allSources(s, false, true)}`;
+${allSources(s, !!s.noOpinion, true)}`;
   return runJson<CoreExtract>(prompt, 16000);
 }
 
@@ -314,7 +322,7 @@ function ordinal(n: number): string {
 // ---------------------------------------------------------------------------
 export async function extractOwnership(s: SourceTexts): Promise<OwnershipExtract> {
   const prompt = `Build the current OIL AND GAS ownership (not surface) for every tax parcel in the title opinion, for the CAR "Leasehold Control and Ownership Summary" and the Pad Summary Ownership tab. Analyst review date: ${s.reviewDate || 'today'}.
-
+${s.noOpinion ? `\n${NO_OPINION}\nFor ownership: use the abstract's ownership report / current owner and vesting deed, the run sheet, the bringdown(s) and the lease lessors. Give fractions only when the abstract states them; otherwise leave exec_fraction and royalty_fraction "" for the analyst. Put "Verify against title opinion" in each owner's notes.\n` : ''}
 Rules:
 - Use ONLY the newest title opinion's current oil and gas ownership tables / certification (older opinions are not provided here).
 - CHANGES AFTER THE OPINION: if any internal bringdown (there may be several, oldest → newest — apply them in order) shows a deed, estate, or other instrument recorded after the certification date that changes vesting (e.g. a deed from the owner to someone else, a deed adding a spouse, a death/estate), UPDATE the owners to the new current owners and interests. Put a note on each changed owner (e.g. "Vesting updated per bringdown: Deed dated 7/1/2026, recorded 7/8/2026, Instr. #202605555, from X to Y") and summarise all such changes in "bringdown_changes" ("" if none). If the bringdown instrument is unclear, keep the opinion's owners and describe the possible change in bringdown_changes instead.
@@ -334,7 +342,7 @@ Rules:
 Return JSON: {"parcels":[...], "owners":[{"parcel_index":0,"tmp":"","owner_name":"","address":"","exec_fraction":"","royalty_fraction":"","vesting":"","lease_index":null,"record_lease_index":null,"lease_status":"","qls_agreement":"","notes":""}], "record_leases":[], "title_notes":"", "bringdown_changes":""}
 Keep output compact — there may be hundreds of owners.
 
-${allSources(s, false)}`;
+${allSources(s, !!s.noOpinion)}`;
   return runJson<OwnershipExtract>(prompt, MAX);
 }
 
@@ -378,7 +386,7 @@ ${fromOpinion ? opinionBlocks(s, true) : block('abstract_of_title_excerpts', s.a
 // 6. LEASEHOLD CHAIN — amendments, every assignment, ORRI
 // ---------------------------------------------------------------------------
 export async function extractChain(s: SourceTexts): Promise<ChainExtract> {
-  const prompt = `Build the "Leasehold Amendments/Ratifications, Assignment Chain & ORRI" tables of the CNX Curative Action Report from the title opinion(s) (the opinion's leasehold / lease chain section, e.g. "SUBJECT LEASE", "LEASEHOLD", "CURRENT OIL AND GAS LEASE"), plus anything recorded later in the internal bringdown(s).
+  const prompt = `${s.noOpinion ? `${NO_OPINION}\nFor this table use the abstract's run sheet / chain of title (leases, assignments, amendments recorded against the subject lease) and the bringdown(s).\n\n` : ''}Build the "Leasehold Amendments/Ratifications, Assignment Chain & ORRI" tables of the CNX Curative Action Report from the title opinion(s) (the opinion's leasehold / lease chain section, e.g. "SUBJECT LEASE", "LEASEHOLD", "CURRENT OIL AND GAS LEASE"), plus anything recorded later in the internal bringdown(s).
 
 Be EXHAUSTIVE: include EVERY instrument the opinion lists in the chain of the subject lease, in the order the opinion lists them (usually a., b., c., ...), all the way to the end of the chain. That includes assignments the opinion says were "given no effect", confirmatory assignments, assignments of wells only, partial/depth assignments, mergers, name changes and corrections. Count the lettered/numbered instruments in the opinion and make sure every one is in your output. Do NOT include prior (expired/released) leases or their assignments — only the current subject lease(s).
 
@@ -391,7 +399,7 @@ TABLES ARE ARRAYS OF ARRAYS OF STRINGS (never objects); [] if none:
 
 Return JSON: {"amendments":[], "assignments":[], "orri":[], "notes":""}
 
-${[opinionBlocks(s, true), block('internal_bringdown', s.bringdown)].join('\n\n')}`;
+${[opinionBlocks(s, true), block('internal_bringdown', s.bringdown), s.noOpinion ? block('abstract_of_title_excerpts', s.abstract) : '', s.noOpinion ? block('lease_summaries', leaseSummary(s.leases)) : ''].filter(Boolean).join('\n\n')}`;
   const out = await runJson<ChainExtract>(prompt, 16000);
   const rowsOf = (v: unknown): string[][] => (Array.isArray(v) ? v : []).map((r) => (Array.isArray(r) ? r.map((x) => String(x ?? '')) : Object.values(r as Record<string, unknown>).map((x) => String(x ?? ''))));
   return { amendments: rowsOf(out.amendments), assignments: rowsOf(out.assignments), orri: rowsOf(out.orri), notes: out.notes || '' };
