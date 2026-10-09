@@ -90,6 +90,21 @@ export function normalizeOwnership(own: OwnershipExtract, leases: LeaseInfo[]): 
   }));
   const allLeases = [...leases, ...record];
   let owners = (own.owners || []).map((o) => {
+    // the AI sometimes leaves a leased owner unmatched — try the uploaded leases by lessor name (2+ name words must match)
+    if ((o.lease_index === null || o.lease_index === undefined) && (o.record_lease_index === null || o.record_lease_index === undefined) && leases.length) {
+      const ot = nameTokens(o.owner_name);
+      let best = -1; let bestHits = 1;
+      leases.forEach((l, i) => {
+        if (o.tmp && l.tmps_covered && l.tmps_covered.trim() && !l.tmps_covered.includes(o.tmp)) return;
+        const lt = new Set(nameTokens(l.lessors));
+        const hits = ot.filter((t) => lt.has(t)).length;
+        if (hits > bestHits) { best = i; bestHits = hits; }
+      });
+      if (best >= 0) {
+        return { ...o, lease_index: best, lease_status: !o.lease_status || /^open$/i.test(o.lease_status) ? 'Primary Term' : o.lease_status,
+          notes: [o.notes, `Lease matched by lessor name (${leases[best].source_file}) — verify.`].filter(Boolean).join(' ') };
+      }
+    }
     const ri = o.record_lease_index;
     if ((o.lease_index === null || o.lease_index === undefined) && ri !== null && ri !== undefined && record[ri]) {
       return { ...o, lease_index: leases.length + ri, lease_status: !o.lease_status || /^open$/i.test(o.lease_status) ? 'Primary Term' : o.lease_status };
@@ -190,12 +205,29 @@ function dedupeKey(defect: string): string {
 export function mergeCurative(specific: CuratorItemExtract[], other: CuratorItemExtract[]): CuratorItemExtract[] {
   const a = (specific || []).filter((i) => SPECIFIC_SECTIONS.has(normSection(i.section)));
   // the "other" pass sometimes repeats specific items under a general/non-action heading when the opinion has none
-  const specKeys = a.map((i) => dedupeKey(i.defect)).filter((k) => k.length > 20);
+  // (e.g. Dickie McCamey: one "CURATIVE ACTION ITEMS" section, then "LIMITATIONS"). Drop any "other" item that has the
+  // same item label as a specific item, or mostly the same words.
+  const label = (d: string) => {
+    const m = (d || '').trim().match(/^(?:(?:specific|general|non[-\s]?action)\s+)?(?:curative\s+)?(?:action\s+)?(?:item|requirement)\s*(?:no\.?\s*|#\s*)?(\d+)/i);
+    return m && /curative|action/i.test(d.slice(0, 40)) ? `item${m[1]}` : '';
+  };
+  const words = (d: string) => new Set(dedupeKey(d).split(' ').filter((w) => w.length > 3).slice(0, 60));
+  const spec = a.map((i) => ({ key: dedupeKey(i.defect), w: words(i.defect), lab: label(i.defect) })).filter((x) => x.key.length > 20);
+  const specificLabelsAreGeneric = spec.some((x) => x.lab) && a.every((i) => !/^\s*specific/i.test(i.defect));
   const copiesSpecific = (d: string) => {
     const k = dedupeKey(d);
     if (k.length <= 20) return false;
     const head = k.slice(0, 80);
-    return specKeys.some((sk) => sk === k || sk.includes(head) || k.includes(sk.slice(0, 80)));
+    const lab = label(d);
+    if (lab && specificLabelsAreGeneric && spec.some((x) => x.lab === lab)) return true;
+    const w = words(d);
+    return spec.some((x) => {
+      if (x.key === k || x.key.includes(head) || k.includes(x.key.slice(0, 80))) return true;
+      if (!w.size || !x.w.size) return false;
+      let inter = 0;
+      w.forEach((t) => { if (x.w.has(t)) inter++; });
+      return inter / Math.min(w.size, x.w.size) >= 0.7;
+    });
   };
   const b = (other || []).filter((i) => !SPECIFIC_SECTIONS.has(normSection(i.section)) && !copiesSpecific(i.defect));
   const seen = new Set<string>();
@@ -823,20 +855,54 @@ export function mergeWiOwners(tables: CarData['wiTables']): CarData['wiTables'] 
   });
 }
 
-/** If every owner is leased to the same lessee but the WI table still says "Open", fill it from the lease. */
+/**
+ * Working interest from the ownership table: when every owner is leased, WI per lessee = Σ (owner's executive fraction ×
+ * parcel weight) and NRI = Σ (fraction × weight × (1 − lease royalty)). One row per lessee, all leases added together.
+ * Falls back to the AI's table when ownership is incomplete (unleased owners, missing fractions or royalty).
+ */
 function wiFromLeases(wi: CoreExtract['wi_tables'], own: OwnershipExtract, leases: LeaseInfo[]): CarData['wiTables'] {
   const tables = wi?.length ? wi : [{ formation: 'All formations', rows: [{ owner: 'Open', wi: '1.0', nri: 'Open', orri: 'Open' }] }];
-  const allOpen = tables.every((t) => t.rows.every((r) => /^open$/i.test((r.owner || '').trim())));
   const owners = own.owners || [];
-  if (!allOpen || !owners.length) return tables;
-  const ls = owners.map((o) => (o.lease_index !== null && o.lease_index !== undefined ? leases[o.lease_index] : undefined));
-  if (ls.some((l) => !l)) return tables;
-  const lessees = new Set(ls.map((l) => (l!.lessee || '').trim()).filter(Boolean));
-  if (lessees.size !== 1) return tables;
-  const rates = new Set(ls.map((l) => fractionToDecimal(l!.royalty_rate)));
-  const rate = rates.size === 1 ? [...rates][0] : null;
-  const nri = rate === null ? '' : String(parseFloat((1 - (rate > 1 ? rate / 100 : rate)).toFixed(6)));
-  return [{ formation: tables[0].formation || 'All formations', rows: [{ owner: [...lessees][0], wi: '1.0', nri, orri: 'No' }] }];
+  if (!owners.length) return tables;
+  const parcels = own.parcels?.length ? own.parcels : [{ label: '', tmp: '', deeded_acres: '', resolved_acres: '' }];
+  // parcel weights: one parcel = 1; several = share of acreage (resolved, else deeded), else equal
+  const acres = parcels.map((p) => parseFloat(((p.resolved_acres || p.deeded_acres || '') + '').replace(/,/g, '')));
+  const totalAc = acres.reduce((a, b) => a + (isNaN(b) ? 0 : b), 0);
+  const weight = (pi: number) => (parcels.length === 1 ? 1 : acres.every((a) => !isNaN(a) && a > 0) && totalAc > 0 ? acres[pi] / totalAc : 1 / parcels.length);
+  const byLessee = new Map<string, { name: string; wi: number; nri: number | null; orri: boolean }>();
+  const perParcel = new Map<number, number>();
+  for (const o of owners) {
+    const lease = o.lease_index !== null && o.lease_index !== undefined ? leases[o.lease_index] : undefined;
+    const frac = fractionToDecimal(o.exec_fraction || o.royalty_fraction || '');
+    if (!lease || frac === null || !(lease.lessee || '').trim()) return tables; // someone is open or unclear → keep AI table
+    const pi = o.parcel_index ?? 0;
+    perParcel.set(pi, (perParcel.get(pi) || 0) + frac);
+    const w = weight(pi);
+    const rate = fractionToDecimal(lease.royalty_rate || '');
+    const r = rate === null ? null : rate > 1 ? rate / 100 : rate;
+    const k = ownerKey(lease.lessee);
+    const cur = byLessee.get(k) || { name: lease.lessee.trim(), wi: 0, nri: 0, orri: false };
+    cur.wi += frac * w;
+    cur.nri = cur.nri === null || r === null ? null : cur.nri + frac * w * (1 - r);
+    byLessee.set(k, cur);
+  }
+  // every parcel must add up to the whole interest
+  if ([...perParcel.values()].some((v) => Math.abs(v - 1) > 0.01)) return tables;
+  // only replace a single all-formations table whose rows are "Open" or these same lessees — depth severances,
+  // assignments to other operators, etc. keep the AI's formation tables
+  if (tables.length > 1) return tables;
+  const known = new Set(byLessee.keys());
+  if (!tables[0].rows.every((rw) => /^open$/i.test((rw.owner || '').trim()) || known.has(ownerKey(rw.owner)))) return tables;
+  const aiOrri = tables.some((t) => t.rows.some((rw) => /^y/i.test(rw.orri || '')));
+  const aiNri = (name: string) => tables.flatMap((t) => t.rows).find((rw) => ownerKey(rw.owner) === ownerKey(name))?.nri || '';
+  const rows = [...byLessee.values()].map((v) => ({
+    owner: v.name,
+    wi: decimalString(String(parseFloat(v.wi.toFixed(8)))),
+    nri: v.nri === null ? aiNri(v.name) : decimalString(String(parseFloat(v.nri.toFixed(8)))),
+    orri: aiOrri ? 'Yes' : 'No',
+  }));
+  const formation = tables.find((t) => t.formation && !/^open$/i.test(t.formation))?.formation || 'All Formations';
+  return [{ formation, rows }];
 }
 
 /**

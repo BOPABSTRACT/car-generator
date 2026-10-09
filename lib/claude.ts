@@ -267,6 +267,7 @@ const CURATIVE_RULES = `For each item return:
 
 LAW FIRM FORMATS: firms lay out their opinions differently. Read the WHOLE opinion before listing items.
 - Some firms number requirements with Roman numerals or letters (e.g. Kostrub: "I.", "II.", "A.", "B.") and put the description of the problem and the requirement in separate paragraphs or sub-parts ("Comment:", "Requirement:", "Discussion:"). The defect must contain ALL of those parts for the item, not only the requirement.
+- Some opinions (e.g. Dickie McCamey) have ONE section headed "CURATIVE ACTION ITEMS" ("CURATIVE ACTION ITEM NO. 1:", each with "REQUIREMENT NO. 1:") followed only by "LIMITATIONS". Then EVERY item in that section is a SPECIFIC item — including ones whose requirement says "None. Advisory only" — there are NO general or non-action items, and LIMITATIONS is the COMMENTS AND LIMITATIONS item.
 - Some older opinions (e.g. Steptoe & Johnson) list the requirements near the BEGINNING of the opinion and the non-action / advisory comments near the END — look in both places.
 - Requirements may be headed "Requirements", "Title Requirements", "Curative Requirements", "Action Items", "Exceptions"; advisory items "Comments", "Advisory Comments", "Notes", "Non-Action Items".
 
@@ -295,7 +296,7 @@ export async function extractCurative(s: SourceTexts, part: 'specific' | 'other'
     : '';
   const scope = part === 'specific'
     ? `Return ONLY the SPECIFIC curative action items / title requirements (the tract-specific requirements)${!range || range.from === 1 ? ', plus any INTERNAL BRINGDOWN ITEMS' : ''}. Do NOT include general items, non-action items or comments/limitations — another pass handles those. Each opinion item appears exactly once.${rangeText}`
-    : 'Return ONLY the GENERAL curative action items, the NON-ACTION curative items, and the COMMENTS AND LIMITATIONS — and only items the opinion itself prints under such a heading. Do NOT include specific / tract requirements, even rephrased, and never copy a specific item into these sections. If the opinion has no general or non-action section, return no items for it (an empty list is correct). Each opinion item appears exactly once — never repeat an item. Set "misc_notes" to "None" (the Miscellaneous section is handled by another pass).';
+    : 'Return ONLY the GENERAL curative action items, the NON-ACTION curative items, and the COMMENTS AND LIMITATIONS — and only items the opinion itself prints under such a heading. Do NOT include specific / tract requirements, even rephrased, and never copy a specific item into these sections. If the opinion has no section actually headed general / non-action / advisory, return no general or non-action items (an empty list is correct) — items under a "Curative Action Items" or "Requirements" heading are never general or non-action, even if marked "Advisory only". Each opinion item appears exactly once — never repeat an item. Set "misc_notes" to "None" (the Miscellaneous section is handled by another pass).';
   const context = s.newerOpinion
     ? '\nNOTE: a NEWER title opinion is included only as context (<newer_title_opinion_for_context_only>). List items ONLY from <title_opinion>; you may use the newer opinion when writing the recommendation (e.g. an item cured or superseded by the newer opinion).\n'
     : '';
